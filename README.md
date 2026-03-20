@@ -6,10 +6,15 @@ Each step runs in an isolated subagent with deterministic validation — shell s
 
 ## Install
 
-Add the marketplace and install the plugin:
+**Step 1:** Add the marketplace:
 
 ```
 /plugin marketplace add Autonoma-AI/test-planner-plugin
+```
+
+**Step 2:** Install the plugin:
+
+```
 /plugin install autonoma-test-planner@autonoma
 ```
 
