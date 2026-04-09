@@ -12,7 +12,7 @@
       "source": {
         "source": "url",
         "url": "https://github.com/IgnacioPardo/test-planner-plugin-sc-v2.git",
-        "ref": "IgnacioPardo/sdk-scenarios"
+        "ref": "main"
       },
       "description": "Generates comprehensive E2E test cases through a validated 4-step pipeline with deterministic validation"
     }
