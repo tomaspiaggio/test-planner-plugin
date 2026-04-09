@@ -85,7 +85,15 @@ def _load_discover_schema(filepath, source):
                 field_map[field_name] = field
         model_map[name] = field_map
 
-    return model_map, None
+    # Collect relation field names used as nesting keys in nested tree create payloads
+    relation_fields = set()
+    relations = schema.get('relations')
+    if isinstance(relations, list):
+        for rel in relations:
+            if isinstance(rel, dict) and isinstance(rel.get('parentField'), str):
+                relation_fields.add(rel['parentField'])
+
+    return {'models': model_map, 'relation_fields': relation_fields}, None
 
 
 def _validate_value_against_field(value, field, path):
@@ -114,9 +122,12 @@ def _validate_value_against_field(value, field, path):
     return None
 
 
-def _validate_create_against_discover(create, model_map, recipe_index):
-    if model_map is None:
+def _validate_create_against_discover(create, discover_info, recipe_index):
+    if discover_info is None:
         return None
+
+    model_map = discover_info['models']
+    relation_fields = discover_info['relation_fields']
 
     for model_name, entities in create.items():
         if model_name not in model_map:
@@ -130,6 +141,9 @@ def _validate_create_against_discover(create, model_map, recipe_index):
                 return f'recipes[{recipe_index}].create.{model_name}[{entity_index}] must be an object'
             for field_name, value in entity.items():
                 if field_name.startswith('_'):
+                    continue
+                # Skip relation nesting keys (e.g. userses, projectses)
+                if field_name in relation_fields:
                     continue
                 if field_name not in field_map:
                     return (
@@ -180,7 +194,7 @@ for field in ['discoverPath', 'scenariosPath']:
         print(f'source.{field} must be a non-empty string')
         sys.exit(1)
 
-discover_model_map, discover_error = _load_discover_schema(filepath, source)
+discover_info, discover_error = _load_discover_schema(filepath, source)
 if discover_error is not None:
     print(discover_error)
     sys.exit(1)
@@ -224,7 +238,7 @@ for i, recipe in enumerate(recipes):
     if not isinstance(create, dict) or len(create) == 0:
         print(f'recipes[{i}].create must be a non-empty object')
         sys.exit(1)
-    create_error = _validate_create_against_discover(create, discover_model_map, i)
+    create_error = _validate_create_against_discover(create, discover_info, i)
     if create_error is not None:
         print(create_error)
         sys.exit(1)

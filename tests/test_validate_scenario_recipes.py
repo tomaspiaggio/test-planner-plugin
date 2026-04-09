@@ -360,3 +360,64 @@ def test_rejects_non_list_value_for_list_field():
     code, out = _run_recipe_validator(data)
     assert code == 1
     assert 'must be a list because discover type is String[]' in out
+
+
+def test_nested_tree_with_relation_fields():
+    """Nested tree creates using relation field names from discover should pass."""
+    discover = {
+        'schema': {
+            'models': [
+                {
+                    'name': 'Organization',
+                    'fields': [
+                        {'name': 'name', 'type': 'String', 'isRequired': True, 'isId': False, 'hasDefault': False},
+                    ],
+                },
+                {
+                    'name': 'User',
+                    'fields': [
+                        {'name': 'email', 'type': 'String', 'isRequired': True, 'isId': False, 'hasDefault': False},
+                        {'name': 'name', 'type': 'String', 'isRequired': True, 'isId': False, 'hasDefault': False},
+                        {'name': 'organizationId', 'type': 'String', 'isRequired': True, 'isId': False, 'hasDefault': False},
+                    ],
+                },
+            ],
+            'edges': [
+                {'from': 'User', 'to': 'Organization', 'localField': 'organizationId', 'foreignField': 'id', 'nullable': False},
+            ],
+            'relations': [
+                {'parentModel': 'Organization', 'childModel': 'User', 'parentField': 'users', 'childField': 'organizationId'},
+            ],
+            'scopeField': 'organizationId',
+        }
+    }
+    data = {
+        'version': 1,
+        'source': {'discoverPath': 'autonoma/discover.json', 'scenariosPath': 'autonoma/scenarios.md'},
+        'validationMode': 'sdk-check',
+        'recipes': [
+            {
+                'name': 'standard', 'description': 'Nested tree',
+                'create': {
+                    'Organization': [{
+                        'name': 'Acme',
+                        'users': [{'name': 'Alice', 'email': 'alice@test.com'}],
+                    }],
+                },
+                'validation': {'status': 'validated', 'method': 'checkScenario', 'phase': 'ok'},
+            },
+            {
+                'name': 'empty', 'description': 'Empty',
+                'create': {'Organization': []},
+                'validation': {'status': 'validated', 'method': 'checkScenario', 'phase': 'ok'},
+            },
+            {
+                'name': 'large', 'description': 'Large',
+                'create': {'Organization': [{'name': 'Big'}]},
+                'validation': {'status': 'validated', 'method': 'checkScenario', 'phase': 'ok'},
+            },
+        ],
+    }
+    code, out = _run_recipe_validator(data, discover=discover)
+    assert code == 0
+    assert out == 'OK'
