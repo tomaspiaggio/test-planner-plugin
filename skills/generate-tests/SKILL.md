@@ -345,16 +345,20 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 if [ -n "$GENERATION_ID" ]; then
   AUTONOMA_ROOT=$(cat /tmp/autonoma-project-root 2>/dev/null || echo '.')
   RECIPE_PATH="$AUTONOMA_ROOT/autonoma/scenario-recipes.json"
-  if python3 -c "import json; json.load(open('$RECIPE_PATH'))" 2>/dev/null; then
-    UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/scenario-recipe-versions" \
-      -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d @"$RECIPE_PATH")
-    UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | grep -o "HTTP_STATUS:[0-9]*" | cut -d: -f2)
-    UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '/HTTP_STATUS:/d')
-    echo "Scenario recipe upload response (HTTP $UPLOAD_STATUS): $UPLOAD_BODY"
-  else
-    echo "WARNING: scenario-recipes.json is not valid JSON, skipping upload"
+  if ! python3 -c "import json; json.load(open('$RECIPE_PATH'))" 2>/dev/null; then
+    echo "ERROR: scenario-recipes.json is not valid JSON. Step 4 cannot complete."
+    exit 1
+  fi
+  UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/scenario-recipe-versions" \
+    -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d @"$RECIPE_PATH")
+  UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | grep -o "HTTP_STATUS:[0-9]*" | cut -d: -f2)
+  UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '/HTTP_STATUS:/d')
+  echo "Scenario recipe upload response (HTTP $UPLOAD_STATUS): $UPLOAD_BODY"
+  if [ "$UPLOAD_STATUS" != "200" ] && [ "$UPLOAD_STATUS" != "201" ]; then
+    echo "ERROR: Recipe upload failed (HTTP $UPLOAD_STATUS). Step 4 cannot complete."
+    exit 1
   fi
 fi
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
