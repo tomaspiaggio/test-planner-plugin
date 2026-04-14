@@ -9,7 +9,11 @@
   "plugins": [
     {
       "name": "autonoma-test-planner",
-      "source": "./",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/IgnacioPardo/test-planner-plugin-sc-v2.git",
+        "ref": "main"
+      },
       "description": "Generates comprehensive E2E test cases through a validated 4-step pipeline with deterministic validation"
     }
   ]

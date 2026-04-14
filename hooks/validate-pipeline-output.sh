@@ -16,6 +16,11 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VALIDATORS_DIR="$SCRIPT_DIR/validators"
 
+# Persist the plugin root so orchestrator/subagent bash snippets can find plugin-local scripts.
+# This hook is the earliest reliable place where we know the plugin directory.
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+echo "$PLUGIN_ROOT" > /tmp/autonoma-plugin-root
+
 # Ensure PyYAML is available (required for frontmatter parsing)
 python3 -c "import yaml" 2>/dev/null || pip3 install pyyaml -q 2>/dev/null
 
@@ -25,6 +30,10 @@ case "$FILE_PATH" in
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_kb.py"
     VALIDATOR_NAME="validate-kb"
     ;;
+  */autonoma/discover.json)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_discover.py"
+    VALIDATOR_NAME="validate-discover"
+    ;;
   */autonoma/features.json)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_features.py"
     VALIDATOR_NAME="validate-features"
@@ -32,6 +41,10 @@ case "$FILE_PATH" in
   */autonoma/scenarios.md)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenarios.py"
     VALIDATOR_NAME="validate-scenarios"
+    ;;
+  */autonoma/scenario-recipes.json)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenario_recipes.py"
+    VALIDATOR_NAME="validate-scenario-recipes"
     ;;
   */autonoma/qa-tests/INDEX.md)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_test_index.py"
@@ -71,6 +84,24 @@ EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ] || [ "$RESULT" != "OK" ]; then
   echo "VALIDATION FAILED [$VALIDATOR_NAME]: $RESULT" >&2
   exit 2
+fi
+
+# scenario-recipes.json must also pass live endpoint preflight. This is the
+# only deterministic check that the generated create payload actually works
+# against the current SDK contract.
+if [ "$VALIDATOR_NAME" = "validate-scenario-recipes" ]; then
+  PREFLIGHT_SCRIPT="$SCRIPT_DIR/preflight_scenario_recipes.py"
+  if [ ! -f "$PREFLIGHT_SCRIPT" ]; then
+    echo "VALIDATION FAILED [scenario-recipes-preflight]: Script not found: $PREFLIGHT_SCRIPT" >&2
+    exit 2
+  fi
+
+  PREFLIGHT_RESULT=$(python3 "$PREFLIGHT_SCRIPT" "$FILE_PATH" 2>&1)
+  PREFLIGHT_EXIT=$?
+  if [ $PREFLIGHT_EXIT -ne 0 ]; then
+    echo "VALIDATION FAILED [scenario-recipes-preflight]: $PREFLIGHT_RESULT" >&2
+    exit 2
+  fi
 fi
 
 # For INDEX.md, also validate directory structure

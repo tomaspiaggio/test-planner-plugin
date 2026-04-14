@@ -13,14 +13,18 @@ You are orchestrating a 4-step test generation pipeline. Each step runs as an is
 **Every step MUST complete successfully and pass validation before the next step begins.**
 Do NOT skip steps. Do NOT proceed if validation fails.
 
-## CRITICAL: User Confirmation Between Steps
+## User Confirmation Between Steps
 
-After each step (1, 2, and 3), you MUST present the summary and then ask the user for
+By default, after each step (1, 2, and 3), you MUST present the summary and then ask the user for
 confirmation using the `AskUserQuestion` tool. This creates an interactive
 UI prompt that makes it clear the user needs to respond before the pipeline continues.
 
 After calling `AskUserQuestion`, wait for the user's response.
 Only proceed to the next step after they confirm.
+
+**Auto-advance mode:** If the environment variable `AUTONOMA_AUTO_ADVANCE` is set to `true`,
+skip the `AskUserQuestion` calls and automatically proceed to the next step after presenting
+the summary. The summaries are still displayed — only the confirmation prompt is skipped.
 
 ## Before Starting
 
@@ -31,10 +35,16 @@ echo "$AUTONOMA_ROOT" > /tmp/autonoma-project-root
 mkdir -p autonoma/skills autonoma/qa-tests
 ```
 
+The plugin root path (where hooks, validators, and helper scripts live) is persisted to `/tmp/autonoma-plugin-root` automatically by the PostToolUse validation hook on the first Write. All bash snippets that need plugin-local files read it back:
+```bash
+PLUGIN_ROOT=$(cat /tmp/autonoma-plugin-root 2>/dev/null || echo '')
+```
+
 Read the environment variables. These are required for reporting progress back to Autonoma:
 - `AUTONOMA_API_KEY` — your Autonoma API key
 - `AUTONOMA_PROJECT_ID` — your Autonoma project ID
 - `AUTONOMA_API_URL` — Autonoma API base URL
+- `AUTONOMA_AUTO_ADVANCE` — (optional) set to `true` to skip user confirmation prompts between steps
 
 Before creating the record, derive a clean human-readable application name from the repository. Look at the git remote URL, the directory name, and any `package.json` / `pyproject.toml` / `README.md` to infer what the product is actually called. Prefer the product name over the repo slug (e.g. "My App" not "my-app-v2-final"). Store it in `APP_NAME`.
 
@@ -119,10 +129,11 @@ print(json.dumps({'skills': skills}))
   -d @- || true
 ```
 
-4. Call `AskUserQuestion` with:
+4. **If `AUTONOMA_AUTO_ADVANCE` is not `true`:** Call `AskUserQuestion` with:
    - question: "Does this core flows table look correct? These flows determine how the test budget is distributed."
    - options: ["Yes, proceed to Step 2", "I want to suggest changes"]
-5. Wait for the user's response before proceeding.
+   Wait for the user's response before proceeding.
+   **If `AUTONOMA_AUTO_ADVANCE=true`:** Skip the prompt and proceed directly to Step 2.
 
 ## Step 2: Generate Scenarios
 
@@ -141,17 +152,56 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
   -d '{"type":"log","data":{"message":"Mapping data model and designing test data environments..."}}' || true
 ```
 
+Before spawning the Step 2 subagent, fetch the SDK discover artifact and save it to `autonoma/discover.json`.
+This step requires these environment variables:
+- `AUTONOMA_SDK_ENDPOINT` — full URL of the customer's SDK endpoint
+- `AUTONOMA_SHARED_SECRET` — the HMAC shared secret used by the SDK endpoint
+
+If either variable is missing, stop and tell the user that Step 2 now requires SDK discover access.
+Do not suggest skipping ahead, reordering the pipeline, or continuing without a working Environment Factory endpoint.
+State plainly that the endpoint and both environment variables are mandatory prerequisites for Step 2.
+
+Fetch and validate the artifact:
+```bash
+AUTONOMA_ROOT=$(cat /tmp/autonoma-project-root 2>/dev/null || echo '.')
+mkdir -p "$AUTONOMA_ROOT/autonoma"
+BODY='{"action":"discover"}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
+RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -X POST "$AUTONOMA_SDK_ENDPOINT" \
+  -H "Content-Type: application/json" \
+  -H "x-signature: $SIG" \
+  -d "$BODY")
+HTTP_STATUS=$(echo "$RESPONSE" | grep -o "HTTP_STATUS:[0-9]*" | cut -d: -f2)
+DISCOVER_BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
+if [ "$HTTP_STATUS" != "200" ]; then
+  echo "SDK discover failed (HTTP $HTTP_STATUS): $DISCOVER_BODY"
+  exit 1
+fi
+printf '%s\n' "$DISCOVER_BODY" > "$AUTONOMA_ROOT/autonoma/discover.json"
+python3 "$(cat /tmp/autonoma-plugin-root)/hooks/validators/validate_discover.py" "$AUTONOMA_ROOT/autonoma/discover.json"
+```
+
+If the fetch fails or validation fails, stop the pipeline at Step 2.
+Do not suggest skipping ahead. Tell the user to provide a working SDK endpoint and correct shared secret, then rerun the command.
+
 Spawn the `scenario-generator` subagent with the following task:
 
-> Read the knowledge base from `autonoma/AUTONOMA.md` and `autonoma/skills/`.
+> Read the knowledge base from `autonoma/AUTONOMA.md`, `autonoma/skills/`, and the SDK discover
+> artifact from `autonoma/discover.json`.
 > Generate test data scenarios. Write the output to `autonoma/scenarios.md`.
-> The file MUST have YAML frontmatter with scenario_count, scenarios summary, and entity_types.
+> The file MUST have YAML frontmatter with scenario_count, scenarios summary, entity_types,
+> discover metadata, and variable_fields. Prefer fixed, reviewable seed values by default. If a
+> field needs uniqueness, prefer a planner-chosen hardcoded literal plus a discriminator before
+> introducing a variable placeholder. Use variable fields only for truly dynamic values such as
+> backend-generated or time-based fields. `generator` is optional and must not default to `faker`.
 > Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-2-scenarios.txt first.
 
 **After the subagent completes:**
-1. Verify `autonoma/scenarios.md` exists and is non-empty
-2. The PostToolUse hook will have validated the frontmatter format automatically
-3. Read the file and present the frontmatter summary to the user — scenario names, entity counts, entity types
+1. Verify `autonoma/discover.json` and `autonoma/scenarios.md` exist and are non-empty
+2. Validate `autonoma/discover.json` using the plugin's validator (path saved in `/tmp/autonoma-plugin-root`)
+3. The PostToolUse hook will have validated the `scenarios.md` frontmatter format automatically
+4. Read the file and present the summary to the user — scenario names, entity counts, entity types,
+   discover schema counts, and the minimal variable field tokens that remain dynamic
 
 Report step complete:
 ```bash
@@ -161,17 +211,18 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"log","data":{"message":"Scenarios generated. 3 test data environments defined (standard, empty, large)."}}' || true
+  -d '{"type":"log","data":{"message":"Scenarios generated from SDK discover. Preserved standard/empty/large plus schema metadata, keeping variable fields minimal and intentional."}}' || true
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"type":"step.completed","data":{"step":1,"name":"Scenarios"}}' || true
 ```
 
-4. Call `AskUserQuestion` with:
-   - question: "Do these scenarios look correct? The standard scenario data becomes hard assertions in your tests."
+4. **If `AUTONOMA_AUTO_ADVANCE` is not `true`:** Call `AskUserQuestion` with:
+   - question: "Do these scenarios look correct? Most seed values should stay concrete, ideally as planner-chosen literals with discriminators, and only truly dynamic values should remain variable for later tests."
    - options: ["Yes, proceed to Step 3", "I want to suggest changes"]
-5. Wait for the user's response before proceeding.
+   Wait for the user's response before proceeding.
+   **If `AUTONOMA_AUTO_ADVANCE=true`:** Skip the prompt and proceed directly to Step 3.
 
 ## Step 3: Generate E2E Test Cases
 
@@ -198,6 +249,9 @@ Spawn the `test-case-generator` subagent with the following task:
 > You MUST create `autonoma/qa-tests/INDEX.md` with frontmatter containing total_tests,
 > total_folders, folder breakdown, and coverage_correlation.
 > Each test file MUST have frontmatter with title, description, criticality, scenario, and flow.
+> Treat `scenarios.md` as fixture input only. Do not generate tests whose purpose is to verify
+> scenario counts, seeded inventories, or Environment Factory correctness. Only reference
+> scenario data when it is needed to test a real user-facing app behavior.
 > Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-3-e2e-tests.txt first.
 
 **After the subagent completes:**
@@ -244,12 +298,13 @@ print(json.dumps({'testCases': test_cases}))
   -d @- || true
 ```
 
-4. Call `AskUserQuestion` with:
+4. **If `AUTONOMA_AUTO_ADVANCE` is not `true`:** Call `AskUserQuestion` with:
    - question: "Does this test distribution look correct? The total test count should roughly correlate with the number of routes/features in your app."
    - options: ["Yes, proceed to Step 4", "I want to suggest changes"]
-5. Wait for the user's response before proceeding.
+   Wait for the user's response before proceeding.
+   **If `AUTONOMA_AUTO_ADVANCE=true`:** Skip the prompt and proceed directly to Step 4.
 
-## Step 4: Implement Environment Factory
+## Step 4: Environment Factory
 
 Report step start:
 ```bash
@@ -263,22 +318,53 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"log","data":{"message":"Implementing Environment Factory endpoint in your backend..."}}' || true
+  -d '{"type":"log","data":{"message":"Implementing or completing the Environment Factory and validating planned scenarios..."}}' || true
 ```
+
+This step requires these environment variables:
+- `AUTONOMA_SDK_ENDPOINT` — full URL of the customer's SDK endpoint
+- `AUTONOMA_SHARED_SECRET` — the HMAC shared secret used by the SDK endpoint
+
+If either variable is missing, stop and tell the user that Step 4 requires SDK endpoint access for
+preflight validation. State plainly that both environment variables are mandatory.
 
 Spawn the `env-factory-generator` subagent with the following task:
 
-> Read the scenarios from `autonoma/scenarios.md` and implement the Autonoma Environment Factory
-> endpoint in the project's backend. The endpoint handles discover/up/down actions.
+> Read `autonoma/discover.json` and `autonoma/scenarios.md`.
+> Implement or complete the Autonoma Environment Factory in the project's backend so it can
+> support the planned scenarios with the current SDK contract, then validate the planned scenarios
+> against that implementation.
 > Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-4-implement-scenarios.txt
 > and https://docs.agent.autonoma.app/llms/guides/environment-factory.txt first.
-> After implementing, run integration tests to verify the endpoint works.
-> Use AUTONOMA_SIGNING_SECRET and AUTONOMA_JWT_SECRET as environment variable names.
+> Preserve the existing discover integration if it already works, and finish `up` / `down`
+> behavior using `AUTONOMA_SHARED_SECRET` and `AUTONOMA_SIGNING_SECRET`.
+> Smoke-test the discover -> up -> down lifecycle in-session after implementing.
+> Then validate `standard`, `empty`, and `large`, and write approved recipes to `autonoma/scenario-recipes.json`.
+> The recipe file must match the current setup API schema:
+> top-level `version: 1`, `source`, `validationMode`, `recipes`; each recipe must use
+> `name`, `description`, `create`, and `validation` with `status: "validated"`,
+> a valid `method`, `phase: "ok"`, and optional `up_ms` / `down_ms`.
+> Do not use the old shape with top-level `scenarios`, `generatedAt`, or per-recipe `validated` / `timing`.
+> When `create` uses `{{token}}` placeholders, include a `variables` field per recipe that defines
+> how each token is resolved. Allowed strategies: `literal`, `derived`, `faker`.
+> Persisted `create` must remain tokenized — never store resolved concrete values.
+> After writing the recipe file, run the preflight helper to validate all recipes against the
+> live SDK endpoint before uploading:
+> `python3 "$(cat /tmp/autonoma-plugin-root)/hooks/preflight_scenario_recipes.py" autonoma/scenario-recipes.json`
+> The preflight must pass for all three scenarios before Step 4 is considered complete.
 
 **After the subagent completes:**
-1. Verify the endpoint was created and tests pass
-2. Present the results to the user — what was implemented, where, test results
-3. Report any issues that need manual attention
+1. Verify the backend implementation or integration changes were made
+2. Verify `autonoma/scenario-recipes.json` exists and is non-empty
+3. Run the preflight helper if the subagent did not already do so:
+```bash
+AUTONOMA_ROOT=$(cat /tmp/autonoma-project-root 2>/dev/null || echo '.')
+python3 "$(cat /tmp/autonoma-plugin-root)/hooks/preflight_scenario_recipes.py" "$AUTONOMA_ROOT/autonoma/scenario-recipes.json"
+```
+If preflight fails, do NOT proceed to upload. Report the failure to the user and stop.
+4. Present the results to the user — endpoint location, what was implemented or fixed, smoke-test results, per-scenario preflight results
+5. Report which environment variables the backend now requires
+6. Report any backend issues that still need manual attention
 
 Report step complete:
 ```bash
@@ -288,7 +374,29 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"log","data":{"message":"Environment Factory implemented and verified."}}' || true
+  -d '{"type":"log","data":{"message":"Uploading validated scenario recipes to setup..."}}' || true
+if [ -n "$GENERATION_ID" ]; then
+  RECIPE_PATH="$AUTONOMA_ROOT/autonoma/scenario-recipes.json"
+  if ! python3 -c "import json; json.load(open('$RECIPE_PATH'))" 2>/dev/null; then
+    echo "ERROR: scenario-recipes.json is not valid JSON. Step 4 cannot complete."
+    exit 1
+  fi
+  UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/scenario-recipe-versions" \
+    -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d @"$RECIPE_PATH")
+  UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | grep -o "HTTP_STATUS:[0-9]*" | cut -d: -f2)
+  UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '/HTTP_STATUS:/d')
+  echo "Scenario recipe upload response (HTTP $UPLOAD_STATUS): $UPLOAD_BODY"
+  if [ "$UPLOAD_STATUS" != "200" ] && [ "$UPLOAD_STATUS" != "201" ]; then
+    echo "ERROR: Recipe upload failed (HTTP $UPLOAD_STATUS). Step 4 cannot complete."
+    exit 1
+  fi
+fi
+[ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
+  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"log","data":{"message":"Environment Factory implementation and scenario validation completed."}}' || true
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -301,4 +409,4 @@ After all steps complete, summarize:
 - **Step 1**: Knowledge base location and core flow count
 - **Step 2**: Scenario count and entity types covered
 - **Step 3**: Total test count, folder breakdown, coverage correlation
-- **Step 4**: Endpoint location, test results, env var setup instructions
+- **Step 4**: Environment Factory location, backend changes, smoke-test results, required secrets, and per-scenario lifecycle results
