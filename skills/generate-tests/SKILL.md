@@ -136,10 +136,10 @@ GENERATION_ID=$(cat autonoma/.generation-id 2>/dev/null || echo '')
 
 4. Call `AskUserQuestion` with:
    - question: "Do these scenarios look correct? The standard scenario data becomes hard assertions in your tests."
-   - options: ["Yes, proceed to Step 3", "I want to suggest changes"]
+   - options: ["Yes, proceed to Step 3 (implement scenarios)", "I want to suggest changes"]
 5. Wait for the user's response before proceeding.
 
-## Step 3: Generate E2E Test Cases
+## Step 3: Implement & Validate Environment Factory
 
 Report step start:
 ```bash
@@ -147,8 +147,51 @@ GENERATION_ID=$(cat autonoma/.generation-id 2>/dev/null || echo '')
 [ -n "$GENERATION_ID" ] && curl -sf -X POST "${AUTONOMA_API_URL}/v1/generation/generations/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.started","data":{"step":2,"name":"E2E Tests"}}' 2>/dev/null || true
+  -d '{"type":"step.started","data":{"step":2,"name":"Environment Factory"}}' 2>/dev/null || true
 ```
+
+Log: "Installing Autonoma SDK and validating scenario lifecycle..."
+
+Spawn the `env-factory-generator` subagent with the following task:
+
+> Read the scenarios from `autonoma/scenarios.md` and set up the Autonoma Environment Factory
+> endpoint in the project's backend using the SDK. Install SDK packages, configure the handler
+> with factories for models with business logic, and validate the full up/down lifecycle.
+> Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-4-implement-scenarios.txt
+> and https://docs.agent.autonoma.app/llms/guides/environment-factory.txt first.
+> Use AUTONOMA_SHARED_SECRET and AUTONOMA_SIGNING_SECRET as environment variable names.
+
+**After the subagent completes:**
+1. Verify the endpoint was created and the lifecycle was validated
+2. Present the results to the user — what was implemented, where, validation results
+3. Report any issues that need manual attention
+
+Report step complete:
+```bash
+GENERATION_ID=$(cat autonoma/.generation-id 2>/dev/null || echo '')
+[ -n "$GENERATION_ID" ] && curl -sf -X POST "${AUTONOMA_API_URL}/v1/generation/generations/${GENERATION_ID}/events" \
+  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"step.completed","data":{"step":2,"name":"Environment Factory"}}' 2>/dev/null || true
+```
+
+4. Call `AskUserQuestion` with:
+   - question: "The Environment Factory is set up and the scenario lifecycle has been validated. Does everything look correct?"
+   - options: ["Yes, proceed to Step 4 (generate tests)", "I want to suggest changes"]
+5. Wait for the user's response before proceeding.
+
+## Step 4: Generate E2E Test Cases
+
+Report step start:
+```bash
+GENERATION_ID=$(cat autonoma/.generation-id 2>/dev/null || echo '')
+[ -n "$GENERATION_ID" ] && curl -sf -X POST "${AUTONOMA_API_URL}/v1/generation/generations/${GENERATION_ID}/events" \
+  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"step.started","data":{"step":3,"name":"E2E Tests"}}' 2>/dev/null || true
+```
+
+Log: "Generating E2E test cases from knowledge base and validated scenarios..."
 
 Spawn the `test-case-generator` subagent with the following task:
 
@@ -159,6 +202,7 @@ Spawn the `test-case-generator` subagent with the following task:
 > total_folders, folder breakdown, and coverage_correlation.
 > Each test file MUST have frontmatter with title, description, criticality, scenario, and flow.
 > Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-3-e2e-tests.txt first.
+> Note: The scenario data has been validated in Step 3 — the Environment Factory can create and tear down all entities.
 
 **After the subagent completes:**
 1. Verify `autonoma/qa-tests/INDEX.md` exists and is non-empty
@@ -171,7 +215,7 @@ GENERATION_ID=$(cat autonoma/.generation-id 2>/dev/null || echo '')
 [ -n "$GENERATION_ID" ] && curl -sf -X POST "${AUTONOMA_API_URL}/v1/generation/generations/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.completed","data":{"step":2,"name":"E2E Tests"}}' 2>/dev/null || true
+  -d '{"type":"step.completed","data":{"step":3,"name":"E2E Tests"}}' 2>/dev/null || true
 
 [ -n "$GENERATION_ID" ] && python3 -c "
 import os, json
@@ -194,49 +238,10 @@ print(json.dumps({'testCases': test_cases}))
   -d @- 2>/dev/null || true
 ```
 
-4. Call `AskUserQuestion` with:
-   - question: "Does this test distribution look correct? The total test count should roughly correlate with the number of routes/features in your app."
-   - options: ["Yes, proceed to Step 4", "I want to suggest changes"]
-5. Wait for the user's response before proceeding.
-
-## Step 4: Implement Environment Factory
-
-Report step start:
-```bash
-GENERATION_ID=$(cat autonoma/.generation-id 2>/dev/null || echo '')
-[ -n "$GENERATION_ID" ] && curl -sf -X POST "${AUTONOMA_API_URL}/v1/generation/generations/${GENERATION_ID}/events" \
-  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"step.started","data":{"step":3,"name":"Environment Factory"}}' 2>/dev/null || true
-```
-
-Spawn the `env-factory-generator` subagent with the following task:
-
-> Read the scenarios from `autonoma/scenarios.md` and implement the Autonoma Environment Factory
-> endpoint in the project's backend. The endpoint handles discover/up/down actions.
-> Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-4-implement-scenarios.txt
-> and https://docs.agent.autonoma.app/llms/guides/environment-factory.txt first.
-> After implementing, run integration tests to verify the endpoint works.
-> Use AUTONOMA_SIGNING_SECRET and AUTONOMA_JWT_SECRET as environment variable names.
-
-**After the subagent completes:**
-1. Verify the endpoint was created and tests pass
-2. Present the results to the user — what was implemented, where, test results
-3. Report any issues that need manual attention
-
-Report step complete:
-```bash
-GENERATION_ID=$(cat autonoma/.generation-id 2>/dev/null || echo '')
-[ -n "$GENERATION_ID" ] && curl -sf -X POST "${AUTONOMA_API_URL}/v1/generation/generations/${GENERATION_ID}/events" \
-  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"step.completed","data":{"step":3,"name":"Environment Factory"}}' 2>/dev/null || true
-```
-
 ## Completion
 
 After all steps complete, summarize:
 - **Step 1**: Knowledge base location and core flow count
 - **Step 2**: Scenario count and entity types covered
-- **Step 3**: Total test count, folder breakdown, coverage correlation
-- **Step 4**: Endpoint location, test results, env var setup instructions
+- **Step 3**: Endpoint location, packages installed, factories registered, validation results
+- **Step 4**: Total test count, folder breakdown, coverage correlation

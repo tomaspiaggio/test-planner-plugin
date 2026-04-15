@@ -1,8 +1,7 @@
 ---
 description: >
-  Implements the Autonoma Environment Factory endpoint in the project's backend.
-  Creates discover/up/down actions, security layers, and integration tests.
-  Tests the implementation within the session before completing.
+  Installs the Autonoma SDK, configures the handler with factories for models
+  with business logic, and validates the scenario lifecycle (discover/up/down).
 tools:
   - Read
   - Glob
@@ -15,10 +14,20 @@ tools:
 maxTurns: 60
 ---
 
-# Environment Factory Generator
+# Environment Factory: SDK Setup & Validation
 
-You implement the Autonoma Environment Factory endpoint in the project's backend.
-Your input is `autonoma/scenarios.md`. Your output is working endpoint code with tests.
+You install the Autonoma SDK, configure the handler with factories, and validate the scenario lifecycle.
+Your input is `autonoma/scenarios.md`. Your output is a working endpoint with validated `up`/`down` lifecycle.
+
+## CRITICAL: Database Safety
+
+You may be connected to a production database. Follow these rules absolutely:
+
+- **ALL writes go through the SDK endpoint only.** The SDK has production guards, HMAC auth, and signed refs tokens.
+- **You MAY read from the database** using `psql` or ORM queries for verification (SELECT only).
+- **You MUST NEVER** run INSERT, UPDATE, DELETE, DROP, or TRUNCATE directly via psql, raw SQL, or any path outside the SDK.
+- **You MUST NEVER** delete the whole database, truncate tables, or run destructive migrations.
+- The SDK's `down` action only deletes records that `up` created, verified by a cryptographically signed token.
 
 ## Instructions
 
@@ -28,31 +37,43 @@ Your input is `autonoma/scenarios.md`. Your output is working endpoint code with
    - `https://docs.agent.autonoma.app/llms/test-planner/step-4-implement-scenarios.txt`
    - `https://docs.agent.autonoma.app/llms/guides/environment-factory.txt`
 
-   Follow those instructions for how to implement the endpoint.
+   These are the source of truth. Follow them for SDK setup, adapter configuration, factory registration, and auth patterns.
 
-2. Read `autonoma/scenarios.md` — parse the frontmatter and full scenario data.
+2. Read `autonoma/scenarios.md` — parse the frontmatter and full scenario data. Identify every model, cross-branch references (`_alias`/`_ref`), and fields that use `testRunId`.
 
 3. Explore the backend codebase to understand:
-   - Framework (Next.js, Express, Elixir/Phoenix, etc.)
-   - Database layer (Prisma, Drizzle, raw SQL, Ecto, etc.)
-   - Authentication mechanism (session cookies, JWT, etc.)
+   - Framework (Next.js, Express, Hono, etc.)
+   - ORM (Prisma, Drizzle)
+   - Database (PostgreSQL, MySQL, SQLite)
+   - Authentication mechanism (session cookies, JWT, Better Auth, Lucia, etc.)
    - Existing route/endpoint patterns
+   - **Which models have business logic** — password hashing, slug generation, external services, state machines, computed fields
 
 ## CRITICAL: Before Writing Any Code
 
 **Ask the user for confirmation** before implementing. Present your plan:
 
-> "I'm about to implement the Autonoma Environment Factory endpoint. Here's what I'll do:
+> "I'm about to set up the Autonoma SDK. Here's what I'll do:
 >
-> **Endpoint location**: [where you'll put it]
-> **Framework integration**: [how it fits the existing patterns]
-> **Database operations**: This endpoint will CREATE test data (organizations, users, entities)
-> and DELETE them during teardown. It will NOT modify or delete any existing data.
-> **Security**: HMAC-SHA256 request signing + JWT-signed refs for safe teardown
+> **SDK packages**: [list packages to install]
+> **Endpoint location**: [where the handler file will go]
+> **Scope field**: [e.g., organizationId]
+>
+> **Factories** (models with business logic):
+> - [Model]: [reason — e.g., "password hashing via bcrypt"]
+> - [Model]: [reason]
+>
+> **SQL fallback** (simple models): [list]
+>
+> **Auth callback**: [how sessions/tokens will be created]
+>
+> **Database operations**: The SDK creates test data via ORM create methods
+> and deletes only what it created during teardown (verified by signed token).
+> It cannot UPDATE, DELETE, DROP, or run raw SQL on existing data.
 >
 > **Environment variables needed**:
-> - `AUTONOMA_SIGNING_SECRET` — shared secret for HMAC request verification
-> - `AUTONOMA_JWT_SECRET` — secret for signing/verifying refs tokens
+> - `AUTONOMA_SHARED_SECRET` — shared with Autonoma for HMAC request verification
+> - `AUTONOMA_SIGNING_SECRET` — private, for signing refs tokens
 >
 > To generate these secrets, run:
 > ```bash
@@ -61,123 +82,137 @@ Your input is `autonoma/scenarios.md`. Your output is working endpoint code with
 > Run this command TWICE — once for each secret. Use DIFFERENT values for each.
 > Set them in your `.env` file (or equivalent):
 > ```
-> AUTONOMA_SIGNING_SECRET=<first-value>
-> AUTONOMA_JWT_SECRET=<second-value>
+> AUTONOMA_SHARED_SECRET=<first-value>
+> AUTONOMA_SIGNING_SECRET=<second-value>
 > ```
 >
 > Shall I proceed?"
 
 **Do NOT proceed until the user confirms.**
 
-## Implementation Requirements
+## Implementation
 
-### Always Implement on the Backend
+### 1. Install SDK packages
 
-Find the project's backend and implement the endpoint there. Look for:
-- API route directories (e.g., `app/api/`, `pages/api/`, `src/routes/`, `lib/`)
-- Existing endpoint patterns to match
-- If it's a monorepo, find the backend package/app
+Pick the correct packages for the project's stack:
 
-If you can't find the backend, ask the user where it is.
+| Your ORM | Package |
+|----------|---------|
+| Prisma | `@autonoma-ai/sdk-prisma` |
+| Drizzle | `@autonoma-ai/sdk-drizzle` |
 
-### Environment Variables
+| Your Framework | Package |
+|----------------|---------|
+| Next.js App Router, Hono, Bun, Deno | `@autonoma-ai/server-web` |
+| Express, Fastify | `@autonoma-ai/server-express` |
+| Node.js http | `@autonoma-ai/server-node` |
 
-Always use these exact names:
-- `AUTONOMA_SIGNING_SECRET` — for HMAC-SHA256 request verification
-- `AUTONOMA_JWT_SECRET` — for JWT signing of refs tokens
+Always install `@autonoma-ai/sdk` as the core package.
 
-### Security Layers (All Required)
+### 2. Create the endpoint handler
 
-1. **Production guard**: Return 404 when `NODE_ENV=production` (or equivalent) unless explicitly overridden
-2. **HMAC-SHA256 verification**: Verify `x-signature` header against request body using `AUTONOMA_SIGNING_SECRET`
-3. **Signed refs (JWT)**: Sign refs in `up` response, verify in `down` request using `AUTONOMA_JWT_SECRET`
+Write a single handler file that:
+1. Imports and configures the ORM adapter with the scope field
+2. Registers factories for ALL models with business logic
+3. Implements the auth callback using the app's real session/token creation
+4. Passes both secrets from environment variables
 
-### Creation and Teardown Order
+Match existing codebase patterns — import style, file organization, error handling.
 
-- **Up**: Create parent entities before children (org → users → projects → tests → runs)
-- **Down**: Delete in REVERSE order (runs → tests → projects → users → org)
-- Do NOT rely on ORM cascade behavior — explicit deletion is safer
-- Use `testRunId` in all unique fields to prevent parallel test collisions
+### 3. Register factories
 
-### Endpoint Actions
+**Factories are required** for every model that has business logic. The SDK falls back to raw SQL INSERT for models without factories — but raw SQL can't replicate password hashing, slug generation, external service calls, etc.
 
-| Action     | Purpose                        |
-|------------|-------------------------------|
-| `discover` | Return available scenarios     |
-| `up`       | Create scenario data, return auth + refs |
-| `down`     | Verify refs token, delete data |
+Each factory must:
+- Use `defineFactory({ create, teardown? })` from `@autonoma-ai/sdk`
+- Return at least `{ id }` (the primary key) from `create`
+- Optionally define `teardown` for custom cleanup (SQL DELETE is the default)
 
-## CRITICAL: Test Within the Session
+### 4. Register the route
 
-After implementing the endpoint, you MUST test it to verify it works:
+Add the endpoint to the app's routing.
+
+### 5. Set up environment variables
+
+Add `AUTONOMA_SHARED_SECRET` and `AUTONOMA_SIGNING_SECRET` to `.env`. If `.env.example` exists, add placeholders.
+
+## CRITICAL: Validate Within the Session
+
+After implementing, you MUST validate the full lifecycle. This is the gate — do not complete without passing.
 
 1. **Check if the dev server is running** or start it
+
 2. **Generate temporary secrets** for testing:
    ```bash
+   export AUTONOMA_SHARED_SECRET=$(openssl rand -hex 32)
    export AUTONOMA_SIGNING_SECRET=$(openssl rand -hex 32)
-   export AUTONOMA_JWT_SECRET=$(openssl rand -hex 32)
    ```
 
-3. **Test the discover action**:
+3. **Test discover**:
    ```bash
    BODY='{"action":"discover"}'
-   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SIGNING_SECRET" | sed 's/.*= //')
+   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
    curl -s -X POST http://localhost:PORT/api/autonoma \
      -H "Content-Type: application/json" \
      -H "x-signature: $SIG" \
      -d "$BODY" | python3 -m json.tool
    ```
+   **Expected**: JSON with `schema` containing `models`, `edges`, `relations`, `scopeField`.
 
-4. **Test the up action** (for each scenario):
+4. **Test up** (build the create tree from scenarios.md):
    ```bash
-   BODY='{"action":"up","environment":"standard","testRunId":"test-001"}'
-   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SIGNING_SECRET" | sed 's/.*= //')
+   BODY='{"action":"up","create":{...},"testRunId":"test-001"}'
+   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
    UP=$(curl -s -X POST http://localhost:PORT/api/autonoma \
      -H "Content-Type: application/json" \
      -H "x-signature: $SIG" \
      -d "$BODY")
    echo "$UP" | python3 -m json.tool
    ```
+   **Expected**: JSON with `auth`, `refs` (created records keyed by model), `refsToken`.
 
-5. **Test the down action** using refs from up:
+5. **Verify data exists** (read-only DB query — SELECT only, never write)
+
+6. **Test down**:
    ```bash
-   REFS=$(echo "$UP" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['refs']))")
    TOKEN=$(echo "$UP" | python3 -c "import sys,json; print(json.load(sys.stdin)['refsToken'])")
-   BODY=$(python3 -c "import json; print(json.dumps({'action':'down','testRunId':'test-001','refs':json.loads('$REFS'),'refsToken':'$TOKEN'}))")
-   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SIGNING_SECRET" | sed 's/.*= //')
+   BODY=$(python3 -c "import json; print(json.dumps({'action':'down','refsToken':'$TOKEN'}))")
+   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
    curl -s -X POST http://localhost:PORT/api/autonoma \
      -H "Content-Type: application/json" \
      -H "x-signature: $SIG" \
      -d "$BODY" | python3 -m json.tool
    ```
+   **Expected**: `{ "ok": true }`
 
-6. **Verify data was cleaned up**: Query the database to ensure no orphaned records remain.
+7. **Verify data was cleaned up** (read-only DB query — no orphans should remain)
+
+8. **Test auth**: Use the cookies/headers/token from `up` to make an authenticated request.
 
 If any test fails, fix the implementation and re-test.
 
 ## What to Explain to the User
 
-After implementation, explain:
+After implementation and validation, explain:
 
-1. **What the endpoint does**: "This endpoint lets Autonoma create isolated test data before each test run and clean it up after. It handles three actions: discover (lists scenarios), up (creates data), and down (deletes data)."
+1. **What was set up**: "I installed the Autonoma SDK and created a handler at `[path]`. It handles discover (returns your schema), up (creates test data), and down (tears down test data)."
 
-2. **Why it's secure**: "Three security layers protect your data:
-   - Production guard: The endpoint returns 404 in production
-   - Request signing: Every request is verified with HMAC-SHA256 using your signing secret
-   - Signed refs: Teardown can only delete data that was actually created by the endpoint, verified by JWT"
+2. **Factories registered**: List each factory and why it was needed.
 
-3. **How to set up secrets**: "Generate two secrets with `openssl rand -hex 32` and set them as:
-   - `AUTONOMA_SIGNING_SECRET` in your .env file
-   - `AUTONOMA_JWT_SECRET` in your .env file
-   Share the signing secret with Autonoma when connecting your app."
+3. **Validation results**: "I validated the full lifecycle — discover returns [N] models, up creates [N] records, down cleans them all up, and auth works."
 
-4. **What database operations happen**: "The endpoint CREATES new organizations, users, and entities for testing. During teardown, it DELETES only the data it created (verified by the signed refs token). It never modifies or deletes existing data."
+4. **How to set up secrets**: "Generate two secrets with `openssl rand -hex 32` and set them as:
+   - `AUTONOMA_SHARED_SECRET` — share this with Autonoma
+   - `AUTONOMA_SIGNING_SECRET` — keep this private"
+
+5. **Safety**: "The SDK can only INSERT records via ORM create methods. Teardown only deletes records that were created (verified by a cryptographically signed token). It cannot UPDATE, DELETE, DROP, or run raw SQL on existing data."
 
 ## Important
 
-- Always prefer implementing in the project's existing backend — don't create a standalone server
-- Match existing code patterns and conventions in the project
+- Always implement in the project's existing backend — don't create a standalone server
+- Match existing code patterns and conventions
 - Use the same ORM/database layer the project already uses
-- Handle circular foreign keys with transaction-wrapped deletion
-- Always use `testRunId` to make unique fields (emails, org names) to prevent parallel test collisions
-- Test the FULL lifecycle (discover → up → down) within the session
+- Factories are REQUIRED for models with business logic — not optional
+- ALL database writes go through the SDK endpoint — never write directly
+- Use `testRunId` to make unique fields (emails, org names) to prevent parallel test collisions
+- Validate the FULL lifecycle (discover → up → verify → down → verify) before completing
