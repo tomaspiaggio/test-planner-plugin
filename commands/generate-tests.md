@@ -9,13 +9,13 @@ description: >
 
 # Autonoma E2E Test Generation Pipeline
 
-You are orchestrating a 4-step test generation pipeline. Each step runs as an isolated subagent.
+You are orchestrating a 5-step test generation pipeline. Each step runs as an isolated subagent.
 **Every step MUST complete successfully and pass validation before the next step begins.**
 Do NOT skip steps. Do NOT proceed if validation fails.
 
 ## CRITICAL: User Confirmation Between Steps
 
-After each step (1, 2, and 3), you MUST present the summary and then ask the user for
+After each step (1, 2, 3, and 4), you MUST present the summary and then ask the user for
 confirmation using the `AskUserQuestion` tool. This creates an interactive
 UI prompt that makes it clear the user needs to respond before the pipeline continues.
 
@@ -124,7 +124,7 @@ print(json.dumps({'skills': skills}))
    - options: ["Yes, proceed to Step 2", "I want to suggest changes"]
 5. Wait for the user's response before proceeding.
 
-## Step 2: Generate Scenarios
+## Step 2: Entity Creation Audit
 
 Report step start:
 ```bash
@@ -134,7 +134,59 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.started","data":{"step":1,"name":"Scenarios"}}' || true
+  -d '{"type":"step.started","data":{"step":1,"name":"Entity Audit"}}' || true
+[ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
+  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"log","data":{"message":"Auditing model creation paths for side effects..."}}' || true
+```
+
+Spawn the `entity-audit-generator` subagent with the following task:
+
+> Read the knowledge base from `autonoma/AUTONOMA.md` and `autonoma/skills/`.
+> Audit how each database model is created in the codebase. For every model, find the service,
+> repository, or function that creates it. Read the actual creation code and identify side effects
+> (password hashing, S3 uploads, external API calls, slug generation, derived fields, etc.).
+> Output to `autonoma/entity-audit.md` with YAML frontmatter listing each model, whether it
+> needs a factory, the creation file/function, and what side effects exist.
+> Fetch the latest instructions from http://localhost:4321/llms/test-planner/step-2-entity-audit.txt first.
+
+**After the subagent completes:**
+1. Verify `autonoma/entity-audit.md` exists and is non-empty
+2. Read and present the frontmatter — specifically which models need factories and why
+3. Report step complete
+
+Report step complete:
+```bash
+AUTONOMA_ROOT=$(cat /tmp/autonoma-project-root 2>/dev/null || echo '.')
+GENERATION_ID=$(cat "$AUTONOMA_ROOT/autonoma/.generation-id" 2>/dev/null || echo '')
+echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
+[ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
+  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"log","data":{"message":"Entity audit complete. Models classified for factory vs raw SQL."}}' || true
+[ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
+  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"step.completed","data":{"step":1,"name":"Entity Audit"}}' || true
+```
+
+4. Call `AskUserQuestion` with:
+   - question: "Does this entity audit look correct? Models marked as needing factories will use your repositories/services instead of raw SQL."
+   - options: ["Yes, proceed to Step 3", "I want to suggest changes"]
+5. Wait for the user's response before proceeding.
+
+## Step 3: Generate Scenarios
+
+Report step start:
+```bash
+AUTONOMA_ROOT=$(cat /tmp/autonoma-project-root 2>/dev/null || echo '.')
+GENERATION_ID=$(cat "$AUTONOMA_ROOT/autonoma/.generation-id" 2>/dev/null || echo '')
+echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
+[ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
+  -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"step.started","data":{"step":2,"name":"Scenarios"}}' || true
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -165,15 +217,15 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.completed","data":{"step":1,"name":"Scenarios"}}' || true
+  -d '{"type":"step.completed","data":{"step":2,"name":"Scenarios"}}' || true
 ```
 
 4. Call `AskUserQuestion` with:
    - question: "Do these scenarios look correct? The standard scenario data becomes hard assertions in your tests."
-   - options: ["Yes, proceed to Step 3 (implement scenarios)", "I want to suggest changes"]
+   - options: ["Yes, proceed to Step 4 (implement scenarios)", "I want to suggest changes"]
 5. Wait for the user's response before proceeding.
 
-## Step 3: Implement & Validate Environment Factory
+## Step 4: Implement & Validate Environment Factory
 
 Report step start:
 ```bash
@@ -183,7 +235,7 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.started","data":{"step":2,"name":"Environment Factory"}}' || true
+  -d '{"type":"step.started","data":{"step":3,"name":"Environment Factory"}}' || true
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -195,6 +247,8 @@ Spawn the `env-factory-generator` subagent with the following task:
 > Read the scenarios from `autonoma/scenarios.md` and set up the Autonoma Environment Factory
 > endpoint in the project's backend using the SDK. Install SDK packages, configure the handler
 > with factories for models with business logic, and validate the full up/down lifecycle.
+> Read the entity audit from `autonoma/entity-audit.md` to know which models need factories
+> and what service/repository code to use for each.
 > Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-4-implement-scenarios.txt
 > and https://docs.agent.autonoma.app/llms/guides/environment-factory.txt first.
 > Use AUTONOMA_SHARED_SECRET and AUTONOMA_SIGNING_SECRET as environment variable names.
@@ -216,15 +270,15 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.completed","data":{"step":2,"name":"Environment Factory"}}' || true
+  -d '{"type":"step.completed","data":{"step":3,"name":"Environment Factory"}}' || true
 ```
 
 4. Call `AskUserQuestion` with:
    - question: "The Environment Factory is set up and the scenario lifecycle has been validated. Does everything look correct?"
-   - options: ["Yes, proceed to Step 4 (generate tests)", "I want to suggest changes"]
+   - options: ["Yes, proceed to Step 5 (generate tests)", "I want to suggest changes"]
 5. Wait for the user's response before proceeding.
 
-## Step 4: Generate E2E Test Cases
+## Step 5: Generate E2E Test Cases
 
 Report step start:
 ```bash
@@ -234,7 +288,7 @@ echo "GENERATION_ID=${GENERATION_ID:-<empty>}"
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.started","data":{"step":3,"name":"E2E Tests"}}' || true
+  -d '{"type":"step.started","data":{"step":4,"name":"E2E Tests"}}' || true
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -250,7 +304,7 @@ Spawn the `test-case-generator` subagent with the following task:
 > total_folders, folder breakdown, and coverage_correlation.
 > Each test file MUST have frontmatter with title, description, criticality, scenario, and flow.
 > Fetch the latest instructions from https://docs.agent.autonoma.app/llms/test-planner/step-3-e2e-tests.txt first.
-> Note: The scenario data has been validated in Step 3 — the Environment Factory can create and tear down all entities.
+> Note: The scenario data has been validated in Step 4 — the Environment Factory can create and tear down all entities.
 
 **After the subagent completes:**
 1. Verify `autonoma/qa-tests/INDEX.md` exists and is non-empty
@@ -271,7 +325,7 @@ TEST_COUNT=$(find "$AUTONOMA_ROOT/autonoma/qa-tests" -name '*.md' ! -name 'INDEX
 [ -n "$GENERATION_ID" ] && curl -f -X POST "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/events" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"type":"step.completed","data":{"step":3,"name":"E2E Tests"}}' || true
+  -d '{"type":"step.completed","data":{"step":4,"name":"E2E Tests"}}' || true
 
 [ -n "$GENERATION_ID" ] && python3 -c "
 import os, json
@@ -300,6 +354,7 @@ print(json.dumps({'testCases': test_cases}))
 
 After all steps complete, summarize:
 - **Step 1**: Knowledge base location and core flow count
-- **Step 2**: Scenario count and entity types covered
-- **Step 3**: Endpoint location, packages installed, factories registered, validation results
-- **Step 4**: Total test count, folder breakdown, coverage correlation
+- **Step 2**: Entity audit — models audited, how many need factories, key side effects found
+- **Step 3**: Scenario count and entity types covered
+- **Step 4**: Endpoint location, packages installed, factories registered, validation results
+- **Step 5**: Total test count, folder breakdown, coverage correlation
