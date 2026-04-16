@@ -12,10 +12,10 @@ This guide explains how to test changes from a branch without publishing to the 
 Remove any existing installation, then add the marketplace pointing to your branch:
 
 ```
-/plugin uninstall autonoma-test-planner
+/plugin uninstall autonoma-test-planner-development
 /plugin marketplace remove autonoma
 /plugin marketplace add https://github.com/Autonoma-AI/test-planner-plugin#your-branch-name
-/plugin install autonoma-test-planner@autonoma
+/plugin install autonoma-test-planner-development@autonoma
 ```
 
 ## Updating after changes
@@ -23,10 +23,10 @@ Remove any existing installation, then add the marketplace pointing to your bran
 Push new commits to your branch, then reinstall:
 
 ```
-/plugin uninstall autonoma-test-planner
+/plugin uninstall autonoma-test-planner-development
 /plugin marketplace remove autonoma
 /plugin marketplace add https://github.com/Autonoma-AI/test-planner-plugin#your-branch-name
-/plugin install autonoma-test-planner@autonoma
+/plugin install autonoma-test-planner-development@autonoma
 ```
 
 ## Environment variables
