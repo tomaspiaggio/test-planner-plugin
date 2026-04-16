@@ -125,8 +125,8 @@ Spawn the `entity-audit-generator` subagent with the following task:
 
 **After the subagent completes:**
 1. Verify `autonoma/entity-audit.md` exists and is non-empty
-2. Read and present the frontmatter — specifically which models need factories and why
-3. Report step complete
+2. The PostToolUse hook will have validated the frontmatter schema automatically (model_count, factory_count, models array with name/needs_factory/reason/creation_file/side_effects)
+3. Read the file and present the frontmatter to the user — specifically which models need factories and why
 
 Report step complete:
 ```bash

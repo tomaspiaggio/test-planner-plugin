@@ -29,6 +29,10 @@ case "$FILE_PATH" in
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_features.py"
     VALIDATOR_NAME="validate-features"
     ;;
+  */autonoma/entity-audit.md)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_entity_audit.py"
+    VALIDATOR_NAME="validate-entity-audit"
+    ;;
   */autonoma/scenarios.md)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenarios.py"
     VALIDATOR_NAME="validate-scenarios"
