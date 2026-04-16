@@ -64,12 +64,13 @@ Spawn the `kb-generator` subagent with the following task:
 
 **After the subagent completes:**
 1. Verify `autonoma/AUTONOMA.md` and `autonoma/features.json` exist and are non-empty
-2. The PostToolUse hook will have validated the frontmatter and features.json schema automatically, emitted step 0 completed + step 1 started, and uploaded the generated skills
+2. The PostToolUse hook will have validated the frontmatter and features.json schema automatically, emitted `step.completed` for step 0, and uploaded the generated skills. `step.started` for step 1 fires only after the user confirms (see step 6).
 3. Read the file and present the frontmatter to the user — specifically the core_flows table
 4. Call `AskUserQuestion` with:
    - question: "Does this core flows table look correct? These flows determine how the test budget is distributed."
    - options: ["Yes, proceed to Step 2", "I want to suggest changes"]
 5. Wait for the user's response before proceeding.
+6. After the user confirms, use the `Write` tool to create `autonoma/.step-1-ack` with a single-character body (e.g. `.`). The hook converts that into `step.started` for step 1, advancing the UI indicator. Do NOT use `touch` — the hook only fires on `Write`/`Edit`.
 
 ## Step 2: Entity Creation Audit
 
@@ -89,12 +90,13 @@ Spawn the `entity-audit-generator` subagent with the following task:
 
 **After the subagent completes:**
 1. Verify `autonoma/entity-audit.md` exists and is non-empty
-2. The PostToolUse hook will have validated the frontmatter schema automatically and emitted step 1 completed + step 2 started
+2. The PostToolUse hook will have validated the frontmatter schema automatically and emitted `step.completed` for step 1. `step.started` for step 2 fires only after the user confirms (see step 6).
 3. Read the file and present the frontmatter to the user — specifically which models have creation code (and will get factories) and which will fall back to raw SQL
 4. Call `AskUserQuestion` with:
    - question: "Does this entity audit look correct? Models with `has_creation_code: true` will get factories that call your real create function. Models with `has_creation_code: false` will use raw SQL INSERT."
    - options: ["Yes, proceed to Step 3", "I want to suggest changes"]
 5. Wait for the user's response before proceeding.
+6. After the user confirms, use the `Write` tool to create `autonoma/.step-2-ack` with a single-character body (e.g. `.`). The hook converts that into `step.started` for step 2.
 
 ## Step 3: Generate Scenarios
 
@@ -107,12 +109,13 @@ Spawn the `scenario-generator` subagent with the following task:
 
 **After the subagent completes:**
 1. Verify `autonoma/scenarios.md` exists and is non-empty
-2. The PostToolUse hook will have validated the frontmatter format automatically and emitted step 2 completed + step 3 started
+2. The PostToolUse hook will have validated the frontmatter format automatically and emitted `step.completed` for step 2. `step.started` for step 3 fires only after the user confirms (see step 6).
 3. Read the file and present the frontmatter summary to the user — scenario names, entity counts, entity types
 4. Call `AskUserQuestion` with:
    - question: "Do these scenarios look correct? The standard scenario data becomes hard assertions in your tests."
    - options: ["Yes, proceed to Step 4 (implement scenarios)", "I want to suggest changes"]
 5. Wait for the user's response before proceeding.
+6. After the user confirms, use the `Write` tool to create `autonoma/.step-3-ack` with a single-character body (e.g. `.`). The hook converts that into `step.started` for step 3.
 
 ## Step 4: Implement & Validate Environment Factory
 
@@ -133,12 +136,13 @@ Spawn the `env-factory-generator` subagent with the following task:
 **After the subagent completes:**
 1. Verify the endpoint was created and the lifecycle was validated
 2. Verify `autonoma/.env-factory-validated` exists — if it doesn't, validation didn't pass and you must not proceed
-3. The PostToolUse hook will have emitted step 3 completed + step 4 started when the sentinel was written
+3. The PostToolUse hook will have emitted `step.completed` for step 3 when the sentinel was written. `step.started` for step 4 fires only after the user confirms (see step 7).
 4. Present the results to the user — what was implemented, where, validation results
 5. Call `AskUserQuestion` with:
    - question: "The Environment Factory is set up and the scenario lifecycle has been validated. Does everything look correct?"
    - options: ["Yes, proceed to Step 5 (generate tests)", "I want to suggest changes"]
 6. Wait for the user's response before proceeding.
+7. After the user confirms, use the `Write` tool to create `autonoma/.step-4-ack` with a single-character body (e.g. `.`). The hook converts that into `step.started` for step 4.
 
 ## Step 5: Generate E2E Test Cases
 

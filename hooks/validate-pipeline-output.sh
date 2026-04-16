@@ -116,14 +116,25 @@ print(json.dumps({'testCases': test_cases}))
 
 # ----------------------------------------------------------------------------
 # Sentinel files: no validation, just event emission.
-# The env-factory agent writes autonoma/.env-factory-validated after the full
-# up/down lifecycle passes — that sentinel is our only reliable signal that
-# step 3 is complete.
+#   - autonoma/.env-factory-validated — env-factory agent writes this after the
+#     full up/down lifecycle passes; signals step 3 complete.
+#   - autonoma/.step-<N>-ack — orchestrator writes this AFTER the user has
+#     confirmed via AskUserQuestion; this is the *only* path that emits
+#     step.started for step N. The UI can therefore show "waiting for
+#     confirmation" in the gap between step.completed (N-1) and step.started N.
 # ----------------------------------------------------------------------------
+STEP_NAMES=("Knowledge Base" "Entity Audit" "Scenarios" "Implement & Validate" "E2E Tests")
+
 case "$FILE_PATH" in
   */autonoma/.env-factory-validated)
     emit_step_event 3 completed "Implement & Validate"
-    emit_step_event 4 started "E2E Tests"
+    exit 0
+    ;;
+  */autonoma/.step-*-ack)
+    ack_num=$(basename "$FILE_PATH" | sed -E 's/^\.step-([0-9]+)-ack$/\1/')
+    if [[ "$ack_num" =~ ^[0-9]+$ ]] && [ "$ack_num" -ge 0 ] && [ "$ack_num" -lt ${#STEP_NAMES[@]} ]; then
+      emit_step_event "$ack_num" started "${STEP_NAMES[$ack_num]}"
+    fi
     exit 0
     ;;
 esac
@@ -222,11 +233,11 @@ if [ "$VALIDATOR_NAME" = "validate-test-index" ]; then
 fi
 
 # Validation passed — emit lifecycle events and upload artifacts.
+# Note: step.started for the NEXT step is NOT emitted here. It fires only when
+# the orchestrator writes autonoma/.step-<N>-ack after the user confirms via
+# AskUserQuestion. That gap gives the UI its "waiting for confirmation" banner.
 if [ -n "$STEP_COMPLETED" ]; then
   emit_step_event "$STEP_COMPLETED" completed "$STEP_COMPLETED_NAME"
-fi
-if [ -n "$STEP_STARTED" ]; then
-  emit_step_event "$STEP_STARTED" started "$STEP_STARTED_NAME"
 fi
 
 case "$POST_UPLOAD" in
