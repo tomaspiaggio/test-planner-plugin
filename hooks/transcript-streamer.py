@@ -44,6 +44,7 @@ def main() -> None:
     # replay it.
     last_size = path.stat().st_size if path.exists() else 0
     idle = 0.0
+    log(f"streamer up transcript={transcript_path} generation_id={generation_id} api_url={api_url} start_offset={last_size}")
 
     while idle < IDLE_SECONDS:
         if not path.exists():
@@ -182,8 +183,36 @@ def forward(payload: dict, generation_id: str, api_url: str, api_key: str) -> No
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             resp.read()
-    except (urllib.error.URLError, TimeoutError, ConnectionError):
-        pass
+            log(f"POST {resp.status} {payload.get('type')} {_summarize(payload)}")
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        log(f"POST {e.code} {payload.get('type')} body={body}")
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        log(f"POST network-error {payload.get('type')} err={e!r}")
+    except Exception as e:
+        log(f"POST unknown-error {payload.get('type')} err={e!r}")
+
+
+def _summarize(payload: dict) -> str:
+    data = payload.get("data") or {}
+    role = data.get("role")
+    if role == "assistant":
+        snippet = (data.get("text") or "").replace("\n", " ")[:80]
+        tools = ",".join(t.get("name", "?") for t in data.get("tool_uses") or [])
+        return f"role=assistant text={snippet!r} tools=[{tools}]"
+    if role == "tool_result":
+        return f"role=tool_result n_results={len(data.get('results') or [])}"
+    return ""
+
+
+def log(msg: str) -> None:
+    # Emit to stderr which is redirected to autonoma/.streamer.log by the kickoff hook.
+    try:
+        print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
     except Exception:
         pass
 
