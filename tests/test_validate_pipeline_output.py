@@ -64,6 +64,143 @@ VALID_RECIPES = {
 }
 
 
+def test_sdk_endpoint_hook_accepts_valid_url():
+    env = os.environ.copy()
+
+    code, out, err = _run_hook(
+        {
+            'autonoma/.sdk-endpoint': 'http://127.0.0.1:3000/api/autonoma\n',
+        },
+        'autonoma/.sdk-endpoint',
+        env,
+    )
+
+    assert code == 0
+    assert out == ''
+    assert err == ''
+
+
+def test_sdk_endpoint_hook_blocks_invalid_url():
+    env = os.environ.copy()
+
+    code, _, err = _run_hook(
+        {
+            'autonoma/.sdk-endpoint': '/api/autonoma\n',
+        },
+        'autonoma/.sdk-endpoint',
+        env,
+    )
+
+    assert code == 2
+    assert 'validate-sdk-endpoint' in err
+    assert 'http or https' in err
+
+
+def test_sdk_integration_hook_accepts_valid_json():
+    env = os.environ.copy()
+
+    code, out, err = _run_hook(
+        {
+            'autonoma/.sdk-integration.json': json.dumps(
+                {
+                    'status': 'ok',
+                    'endpointUrl': 'http://127.0.0.1:3000/api/autonoma',
+                    'endpointPath': '/api/autonoma',
+                    'stack': {
+                        'language': 'TypeScript',
+                        'framework': 'Express',
+                        'orm': 'Prisma',
+                        'packageManager': 'pnpm',
+                    },
+                    'packagesInstalled': ['@autonoma-ai/sdk'],
+                    'sharedSecretPresent': True,
+                    'signingSecretPresent': True,
+                    'devServer': {'startedByPlugin': True, 'pid': 1234},
+                    'verification': {
+                        'discover': {'status': 'ok', 'validatedByPlugin': True},
+                        'up': {'status': 'ok'},
+                        'down': {'status': 'ok'},
+                    },
+                    'branch': {'name': 'autonoma/feat-autonoma-sdk'},
+                    'pr': {'url': 'https://github.com/example/repo/pull/1'},
+                    'blockingIssues': [],
+                }
+            ),
+        },
+        'autonoma/.sdk-integration.json',
+        env,
+    )
+
+    assert code == 0
+    assert out == ''
+    assert err == ''
+
+
+def test_sdk_integration_hook_blocks_invalid_json():
+    env = os.environ.copy()
+
+    code, _, err = _run_hook(
+        {
+            'autonoma/.sdk-integration.json': json.dumps({'status': 'ok'}),
+        },
+        'autonoma/.sdk-integration.json',
+        env,
+    )
+
+    assert code == 2
+    assert 'validate-sdk-integration' in err
+    assert 'Missing required fields' in err
+
+
+def test_scenario_validation_hook_accepts_valid_json():
+    env = os.environ.copy()
+
+    code, out, err = _run_hook(
+        {
+            'autonoma/.scenario-validation.json': json.dumps(
+                {
+                    'status': 'ok',
+                    'preflightPassed': True,
+                    'smokeTestPassed': True,
+                    'validatedScenarios': ['standard', 'empty', 'large'],
+                    'failedScenarios': [],
+                    'blockingIssues': [],
+                    'recipePath': 'autonoma/scenario-recipes.json',
+                    'validationMode': 'sdk-check',
+                    'endpointUrl': 'http://127.0.0.1:3000/api/autonoma',
+                }
+            ),
+        },
+        'autonoma/.scenario-validation.json',
+        env,
+    )
+
+    assert code == 0
+    assert out == ''
+    assert err == ''
+
+
+def test_scenario_validation_hook_blocks_invalid_json():
+    env = os.environ.copy()
+
+    code, _, err = _run_hook(
+        {
+            'autonoma/.scenario-validation.json': json.dumps(
+                {
+                    'status': 'failed',
+                    'preflightPassed': False,
+                }
+            ),
+        },
+        'autonoma/.scenario-validation.json',
+        env,
+    )
+
+    assert code == 2
+    assert 'validate-scenario-validation' in err
+    assert 'Missing required fields' in err
+
+
 def _run_hook(files: dict[str, str], target: str, env: dict[str, str]) -> tuple[int, str, str]:
     with tempfile.TemporaryDirectory() as tmpdir:
         for relpath, content in files.items():

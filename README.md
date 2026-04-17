@@ -1,20 +1,13 @@
 # Autonoma Test Planner
 
-A Claude Code plugin that generates comprehensive E2E test suites for your codebase through a validated 4-step pipeline.
+A Claude Code plugin that generates comprehensive E2E test suites for your codebase through a validated 5-step pipeline.
 
-Each step runs in an isolated subagent with deterministic validation — shell scripts check the output format before the pipeline advances. No hallucinated validations, no cascading errors.
+Each step runs in an isolated subagent with deterministic validation. The first step now integrates the Autonoma SDK directly into the target project, and the final step validates scenarios against that live endpoint without editing backend code.
 
 ## Install
 
-**Step 1:** Add the marketplace:
-
-```
+```text
 /plugin marketplace add Autonoma-AI/test-planner-plugin
-```
-
-**Step 2:** Install the plugin:
-
-```
 /plugin install autonoma-test-planner@autonoma
 ```
 
@@ -22,184 +15,137 @@ Each step runs in an isolated subagent with deterministic validation — shell s
 
 Inside any project with Claude Code:
 
-```
+```text
 /autonoma-test-planner:generate-tests
 ```
 
-The plugin walks you through 4 steps, asking for confirmation at each checkpoint before proceeding.
+The canonical launch mode is `AUTONOMA_AUTO_ADVANCE=true`, which keeps the plugin moving after
+Steps 1-4. If you are still using the older confirmation flag, `AUTONOMA_REQUIRE_CONFIRMATION=false`
+is treated as the same auto-advance behavior.
 
-## How it works
+## Pipeline
 
-### Step 1: Knowledge Base
+### Step 1: SDK Integration
 
-Analyzes your frontend codebase and produces `autonoma/AUTONOMA.md` — a user-perspective map of every page, flow, and feature. The file includes YAML frontmatter with a core flows table that determines how test coverage is distributed.
+Detects the project stack, installs the Autonoma SDK from package managers, wires the endpoint, ensures secrets exist, starts or reuses a local dev server, verifies signed `discover` / `up` / `down`, and writes `autonoma/.sdk-endpoint` plus `autonoma/.sdk-integration.json`.
 
-**You review**: the core flows table. If a flow is marked `core: true`, it gets 50-60% of test coverage.
+It may also create a branch, commit the integration, and open a PR when `gh` is available.
 
-### Step 2: Scenarios
+**You review**: detected stack, installed packages, endpoint URL, generated env vars, and PR status.
 
-Reads the knowledge base and the SDK `discover` response from your backend Environment Factory to design three test data environments: `standard` (realistic variety), `empty` (empty states), and `large` (pagination/performance). Outputs `autonoma/discover.json` plus `autonoma/scenarios.md`, preserving the legacy scenario summary while adding schema metadata and minimal variable-field planning.
+### Step 2: Knowledge Base
 
-**You review**: entity names, counts, relationships, and which values truly must stay generated. Fixed values are preferred because they become stable test assertions; if uniqueness is needed, the planner should first prefer concrete hardcoded values with a discriminator. Variable fields are exceptions used only for genuinely dynamic values. Generator hints are optional and are not tied to `faker`.
+Analyzes the app and produces `autonoma/AUTONOMA.md` and `autonoma/features.json`.
 
-### Step 3: E2E Tests
+**You review**: the core flows table.
 
-Generates markdown test files organized by feature in `autonoma/qa-tests/`. Each test has frontmatter (title, description, criticality, scenario, flow) and uses only natural-language steps: click, scroll, type, assert.
+### Step 3: Scenarios
 
-An `INDEX.md` tracks total test count, folder breakdown, and coverage correlation with your codebase size.
+Fetches `discover` from the Step 1 endpoint and produces `autonoma/discover.json` plus `autonoma/scenarios.md`.
 
-`scenarios.md` is fixture input for this step, not the subject under test. Step 3 should not spend test budget verifying seeded counts or Environment Factory correctness.
+**You review**: entity names, counts, relationships, and which values should stay concrete versus variable.
 
-**You review**: test distribution and coverage correlation. Test count should roughly match 3-5x your route/feature count.
+### Step 4: E2E Tests
 
-### Step 4: Environment Factory
+Generates markdown test files in `autonoma/qa-tests/` plus `INDEX.md`.
 
-Implements or completes the backend Environment Factory so the planned scenarios can actually be created and torn down through the current SDK contract. Step 4 includes backend wiring plus validation: `discover`, `up`, `down`, request signing, refs signing, a smoke-tested lifecycle, and validation of the planned scenarios with `autonoma/scenario-recipes.json`. After validation, the plugin uploads the parsed recipe document to the setup API through the dedicated `scenario-recipe-versions` route so Step 04 in `agent` can persist normalized scenario data directly.
+**You review**: test distribution and coverage correlation.
 
-**You review**: where the Environment Factory lives, what changed, whether a smoke `discover` → `up` → `down` check passed, and whether `standard`, `empty`, and `large` all passed lifecycle validation.
+### Step 5: Scenario Validation
 
-## Scenario Recipes
+Validates `standard`, `empty`, and `large` against the live SDK endpoint, writes `autonoma/scenario-recipes.json` plus `autonoma/.scenario-validation.json`, runs endpoint preflight, and uploads the approved recipes to the setup API only after all checks pass.
 
-`autonoma/scenario-recipes.json` is the validated handoff between planning and execution. It is produced in Step 4 after the Environment Factory has been implemented or verified and after each scenario has passed lifecycle validation.
+This step does **not** implement backend code. It only validates the existing integration.
 
-The file contains:
+## Key Outputs
 
-- top-level metadata: `version`, `source`, and `validationMode`
-- one recipe per named scenario, usually `standard`, `empty`, and `large`
-- for each recipe:
-  - `name` and `description`
-  - `create`: the inline data graph Autonoma will send to the SDK `up` action
-  - `validation`: proof that the recipe passed `checkScenario`, `checkAllScenarios`, or endpoint lifecycle validation
-
-Conceptually, a scenario recipe is not a test case. It is a data fixture definition for the Environment Factory. The `create` payload describes which records should exist before a run starts, including nested records and references such as `_alias` and `_ref`.
-
-Example shape:
-
-```json
-{
-  "version": 1,
-  "source": {
-    "discoverPath": "autonoma/discover.json",
-    "scenariosPath": "autonoma/scenarios.md"
-  },
-  "validationMode": "sdk-check",
-  "recipes": [
-    {
-      "name": "standard",
-      "description": "Realistic baseline workspace",
-      "create": {
-        "User": [{ "email": "{{owner_email}}" }]
-      },
-      "variables": {
-        "owner_email": {
-          "strategy": "derived",
-          "source": "testRunId",
-          "format": "owner+{testRunId}@example.com"
-        }
-      },
-      "validation": {
-        "status": "validated",
-        "method": "checkScenario",
-        "phase": "ok"
-      }
-    }
-  ]
-}
-```
-
-Persisted recipes store tokenized `create` payloads plus `variables` metadata — never resolved concrete values. The `variables` field defines how each `{{token}}` is resolved at runtime using one of three strategies: `literal`, `derived` (from `testRunId`), or `faker`. This allows the `agent` to resolve the same tokens later for real runs.
-
-During Step 4, the plugin runs a preflight check that resolves tokens into transient concrete payloads and sends signed `up`/`down` requests to the live SDK endpoint. The write hook also enforces that same preflight before a final `autonoma/scenario-recipes.json` write is accepted. These transient values are never persisted.
-
-Storage semantics:
-
-- in this plugin repo, `autonoma/scenario-recipes.json` is a local output artifact so the user and validators can inspect it
-- when uploaded to `agent`, the backend does not keep the raw JSON file as text
-- instead, `agent` parses the document and stores the approved scenario recipe data in its scenario JSONB storage through the `scenario-recipe-versions` setup endpoint
-
-Runtime semantics:
-
-- the planner still thinks in named scenarios like `standard`, `empty`, and `large`
-- the SDK protocol does not require those names on the wire
-- before a run, Autonoma resolves the active stored recipe version for the selected scenario and sends its `create` payload to the Environment Factory `up` action
-- after the run, Autonoma calls `down` using the returned teardown refs/token
-
-## Validation
-
-Every output file has YAML frontmatter validated by shell scripts (not prompts). If validation fails, Claude sees the error and must fix it before proceeding.
-
-| File | What's validated |
-|------|-----------------|
-| `AUTONOMA.md` | core_flows table, app description, feature/skill counts |
-| `discover.json` | SDK discover schema shape: models, edges, relations, scopeField, and supported `type` formats |
-| `scenarios.md` | scenario count, required scenarios (standard/empty/large), entity types, discover metadata, minimal variable fields |
-| `scenario-recipes.json` | validated recipe file, discover-aware model/field/type parity, required scenarios, optional variables consistency, and mandatory live endpoint preflight |
-| `INDEX.md` | test totals match folder sums, criticality counts sum correctly, test count within expected range |
-| Each test file | title, description, criticality (critical/high/mid/low), scenario, flow |
+- `autonoma/.sdk-endpoint`: validated SDK endpoint URL
+- `autonoma/.sdk-integration.json`: Step 1 machine-readable handoff
+- `autonoma/AUTONOMA.md`
+- `autonoma/features.json`
+- `autonoma/discover.json`
+- `autonoma/scenarios.md`
+- `autonoma/qa-tests/INDEX.md`
+- `autonoma/.scenario-validation.json`: Step 5 terminal-state artifact
+- `autonoma/scenario-recipes.json`
 
 ## Environment Variables
 
-Step 2 and Step 4 use the live SDK endpoint when fetching `discover` or validating through HTTP:
+Provide these before running the plugin:
 
 ```bash
-AUTONOMA_SDK_ENDPOINT=<your sdk endpoint url>
-AUTONOMA_SHARED_SECRET=<shared HMAC secret>
+AUTONOMA_API_KEY=<api key>
+AUTONOMA_PROJECT_ID=<application id>
+AUTONOMA_API_URL=<setup api base url>
 ```
 
-Step 4 backend implementation uses the current SDK secret names:
+Canonical:
 
 ```bash
-AUTONOMA_SHARED_SECRET=<shared HMAC secret>
-AUTONOMA_SIGNING_SECRET=<private refs signing secret>
+AUTONOMA_AUTO_ADVANCE=true
 ```
 
-## Requirements
+Compatibility alias:
 
-- Claude Code
-- Python 3 (ships with macOS/Linux)
-- PyYAML (auto-installed if missing)
+```bash
+AUTONOMA_REQUIRE_CONFIRMATION=false
+```
+
+You no longer need to pre-provide `AUTONOMA_SDK_ENDPOINT` or `AUTONOMA_SHARED_SECRET`. Step 1 creates or discovers them in the target project.
+
+The integration step updates `.env` and `.env.example` in the target repo with:
+
+```bash
+AUTONOMA_SHARED_SECRET=<shared hmac secret>
+AUTONOMA_SIGNING_SECRET=<private signing secret>
+```
+
+Those changes still need to be deployed after PR creation or merge.
+
+## Validation
+
+Every pipeline output is validated by shell-dispatched Python validators.
+
+| File | Validation |
+| --- | --- |
+| `AUTONOMA.md` | frontmatter and core-flow structure |
+| `features.json` | feature inventory schema |
+| `discover.json` | SDK discover schema |
+| `.sdk-endpoint` | absolute `http` or `https` URL |
+| `.sdk-integration.json` | Step 1 handoff contract |
+| `scenarios.md` | scenario schema and required sections |
+| `.scenario-validation.json` | Step 5 terminal-state contract |
+| `scenario-recipes.json` | recipe schema plus live endpoint preflight |
+| `INDEX.md` | test totals and folder breakdown |
+| test files | required frontmatter |
 
 ## Local Development
 
 ```bash
-# Test locally without installing
 claude --plugin-dir ./
-
-# Validate plugin structure
 claude plugin validate ./
+pytest
 ```
 
 ## Project Structure
 
-```
+```text
 autonoma-test-planner/
 ├── .claude-plugin/
-│   ├── plugin.json                     # Plugin manifest
-│   └── marketplace.json                # Marketplace catalog
-├── skills/generate-tests/SKILL.md      # /generate-tests orchestrator
+├── commands/generate-tests.md
+├── skills/generate-tests/SKILL.md
 ├── agents/
-│   ├── kb-generator.md                 # Step 1 subagent
-│   ├── scenario-generator.md           # Step 2 subagent
-│   ├── test-case-generator.md          # Step 3 subagent
-│   └── env-factory-generator.md        # Step 4 subagent
+│   ├── sdk-integrator.md
+│   ├── kb-generator.md
+│   ├── scenario-generator.md
+│   ├── test-case-generator.md
+│   └── scenario-validator.md
 ├── hooks/
-│   ├── hooks.json                      # PostToolUse hook config
-│   ├── validate-pipeline-output.sh     # Validation dispatcher
-│   ├── preflight_scenario_recipes.py   # Preflight resolver + endpoint lifecycle checker
+│   ├── validate-pipeline-output.sh
+│   ├── preflight_scenario_recipes.py
 │   └── validators/
-│       ├── validate_kb.py
-│       ├── validate_discover.py
-│       ├── validate_scenario_recipes.py
-│       ├── validate_scenarios.py
-│       ├── validate_test_index.py
-│       └── validate_test_file.py
-├── LICENSE
-└── README.md
+└── tests/
 ```
-
-## Documentation
-
-Full prompt documentation: [docs.agent.autonoma.app/llms.txt](https://docs.agent.autonoma.app/llms.txt)
 
 ## License
 

@@ -1,58 +1,67 @@
 # Autonoma Test Planner Plugin
 
-Claude Code plugin that generates E2E test suites through a 4-step deterministic pipeline.
+Claude Code plugin that generates E2E test suites through a deterministic 5-step pipeline.
 
 ## Project Structure
 
-```
-.claude-plugin/           # Plugin manifest (plugin.json, marketplace.json)
-commands/generate-tests.md  # Entry point — dispatches the 4-step pipeline
-skills/generate-tests/SKILL.md  # Orchestrator skill
-agents/                   # Isolated subagents (one per step)
-  kb-generator.md         # Step 1: Knowledge base → autonoma/AUTONOMA.md + features.json
-  scenario-generator.md   # Step 2: Discover + scenarios → autonoma/discover.json + autonoma/scenarios.md
-  test-case-generator.md  # Step 3: Tests → autonoma/qa-tests/INDEX.md + test files
-  env-factory-generator.md # Step 4: Environment Factory implementation/integration + scenario validation
+```text
+.claude-plugin/              # Plugin manifest
+commands/generate-tests.md   # Command entry
+skills/generate-tests/SKILL.md
+agents/
+  sdk-integrator.md          # Step 1: SDK integration
+  kb-generator.md            # Step 2: Knowledge base
+  scenario-generator.md      # Step 3: Scenarios
+  test-case-generator.md     # Step 4: E2E tests
+  scenario-validator.md      # Step 5: Scenario validation
 hooks/
-  hooks.json              # PostToolUse hook config (triggers on Write)
-  validate-pipeline-output.sh  # Bash dispatcher → routes to Python validators
-  validators/             # Python scripts that validate YAML frontmatter
+  hooks.json
+  validate-pipeline-output.sh
+  preflight_scenario_recipes.py
+  validators/
+tests/
 ```
 
-## How the Pipeline Works
+## Pipeline
 
-Each step spawns an isolated subagent. After each Write, the PostToolUse hook in `hooks/hooks.json` runs `validate-pipeline-output.sh`, which pattern-matches the file path and runs the appropriate Python validator. Validators exit 0 (OK) or 2 (block with error message).
+1. SDK Integration
+2. Knowledge Base
+3. Scenarios
+4. E2E Tests
+5. Scenario Validation
 
-Steps 1-3 require user confirmation before advancing. Step 4 is the final step.
+The canonical launch mode is `AUTONOMA_AUTO_ADVANCE=true`. If you are still using the older flag,
+`AUTONOMA_REQUIRE_CONFIRMATION=false` is treated as the same auto-advance behavior. Step 5 is final.
 
 ## Validation
 
-Validators are in `hooks/validators/`. They parse YAML frontmatter and check required fields, types, and cross-file consistency. All validators print "OK" on success or an error message on failure.
+Validators are in `hooks/validators/`.
 
 | Validator | File matched | Key checks |
 |-----------|-------------|------------|
-| `validate_kb.py` | `*/autonoma/AUTONOMA.md` | app_name, app_description (≥20 chars), core_flows with at least one `core: true` |
+| `validate_kb.py` | `*/autonoma/AUTONOMA.md` | app_name, app_description, core_flows |
 | `validate_discover.py` | `*/autonoma/discover.json` | schema object, models, edges, relations, scopeField |
-| `validate_features.py` | `*/autonoma/features.json` | features array length matches total_features, valid types, at least one core feature |
-| `validate_scenarios.py` | `*/autonoma/scenarios.md` | scenario_count ≥ 3, standard/empty/large scenarios present, entity_types, discover metadata, variable field strategy |
-| `validate_scenario_recipes.py` | `*/autonoma/scenario-recipes.json` | approved recipe file, validation mode, standard/empty/large present, lifecycle status |
-| `validate_test_index.py` | `*/autonoma/qa-tests/INDEX.md` | test totals match folder sums, criticality sums, cross-checks against features.json |
-| `validate_test_file.py` | `*/autonoma/qa-tests/*/[!I]*.md` | title, description, criticality (critical/high/mid/low), scenario, flow |
+| `validate_sdk_endpoint.py` | `*/autonoma/.sdk-endpoint` | absolute http/https URL |
+| `validate_sdk_integration.py` | `*/autonoma/.sdk-integration.json` | Step 1 handoff contract |
+| `validate_features.py` | `*/autonoma/features.json` | feature inventory schema |
+| `validate_scenarios.py` | `*/autonoma/scenarios.md` | scenario count and metadata |
+| `validate_scenario_validation.py` | `*/autonoma/.scenario-validation.json` | Step 5 terminal-state contract |
+| `validate_scenario_recipes.py` | `*/autonoma/scenario-recipes.json` | recipe schema |
+| `validate_test_index.py` | `*/autonoma/qa-tests/INDEX.md` | test totals and folder sums |
+| `validate_test_file.py` | `*/autonoma/qa-tests/*/[!I]*.md` | test frontmatter |
+
+Scenario recipes also run live endpoint preflight through `hooks/preflight_scenario_recipes.py`.
 
 ## Development
 
 ```bash
-# Run plugin locally without installing
 claude --plugin-dir ./
-
-# Validate plugin structure
 claude plugin validate ./
+pytest
 ```
 
-## Dependencies
+## Notes
 
-- Python 3 + PyYAML (auto-installed by the hook if missing)
-
-## Known Issues
-
-- `commands/generate-tests.md` has unresolved merge conflicts between the AskUserQuestion approach and the end-turn approach for user confirmation between steps. Resolve before merging to main.
+- Step 1 installs the SDK from package managers only.
+- The SDK reference repo is read-only context.
+- Step 5 validates the live integration and does not edit backend code.
