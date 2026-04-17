@@ -33,6 +33,25 @@ You may be connected to a production database. Follow these rules absolutely:
 - **You MUST NEVER** delete the whole database, truncate tables, or run destructive migrations.
 - The SDK's `down` action only deletes records that `up` created, verified by a cryptographically signed token.
 
+## The #1 rule — read before writing a single factory
+
+**`db.<model>.create()` (or any equivalent ORM/SQL write) inside a factory body for a model
+whose audit says `has_creation_code: true` is NEVER acceptable.** There is no condition
+under which this is the right output. If calling the audited function feels hard (inline in
+a route, buried in a framework hook, needs DI, triggers Temporal), the answer is never
+"just use the ORM." The answer is one of: extract, wire DI, use the app's test-mode
+toggle, or stop and ask the user.
+
+If you catch yourself typing `prisma.x.create`, `db.x.create`, `tx.insert`, `Repo.insert`,
+`<Model>::create`, `Model.objects.create`, `entityManager.persist`, etc. inside a factory
+body for an audited model — delete it. Go back to the per-model decision tree below.
+
+The entire value of factories is that tests run through the user's real creation path. An
+inline ORM call bypasses password hashing, slug generation, audit logs, Stripe sync,
+framework hooks that provision sibling rows, state-machine transitions, and every piece of
+business logic the user will add next month. It produces data that looks right in a
+`SELECT *` but is silently wrong in ways the tests can't catch.
+
 ## Instructions
 
 1. All Autonoma documentation MUST be fetched via `curl` in the Bash tool. Do NOT use
@@ -71,6 +90,13 @@ You may be connected to a production database. Follow these rules absolutely:
    - Database (PostgreSQL, MySQL, SQLite)
    - Authentication mechanism (session cookies, JWT, Better Auth, Lucia, etc.)
    - Existing route/endpoint patterns
+   - **Auth-adjacent framework hooks** — Better Auth `databaseHooks`, NextAuth callbacks,
+     Lucia adapters, Clerk webhooks. These frequently contain the real creation logic for
+     User/Session/Account and also write to sibling tables (Organization, Member, Billing).
+     The audit will flag these with `needs_extraction: true`.
+   - **App composition root** — where the app wires services, clients, and repositories
+     (DI container, service registry, module init). You'll reuse this wiring when a
+     creation function needs dependencies beyond `ctx.executor`.
 
 ## Factory registration philosophy
 
@@ -84,6 +110,153 @@ that logic — it's always a compatibility risk.
 Models with `has_creation_code: false` fall back to the SDK's raw SQL path. That's safe because
 the audit explicitly determined there's no creation logic to preserve.
 
+## Per-model decision tree (run this BEFORE writing any factory)
+
+For every model with `has_creation_code: true` in `autonoma/entity-audit.md`, walk this tree
+in order. Do NOT skip. Each branch has exactly one legitimate output — there is no "give up
+and use `db.<model>.create()`" escape hatch.
+
+### Branch 1 — `needs_extraction: true`
+
+Meaning: the creation logic exists inline in a route handler, a framework hook (Better Auth
+`databaseHooks`, NextAuth callbacks, Express middleware closures), or an anonymous closure.
+There is no named export to import.
+
+**Mandatory action — extract before wiring:**
+
+1. Open `creation_file`. Find the inline block named by `creation_function`.
+2. Move the body into a new **named, exported function** in the nearest sensible module
+   (a new `*.service.ts`, `*.repository.ts`, a sibling `create-<model>.ts`, or an existing
+   service file if one exists nearby). The function must:
+   - Take a plain input object (no `req`/`res`/`ctx` — those are HTTP concerns).
+   - Return the created record (at minimum `{ id }`).
+   - Preserve every side effect the inline block had — including writes to sibling tables
+     that framework hooks produce (e.g. Better Auth's `user.create` hook provisioning an
+     Organization, Member, BillingCustomer; NextAuth's callback writing Account rows).
+3. Replace the inline block with a call to the new function. The real HTTP caller's
+   behavior MUST stay identical. Run the project's typecheck/test command before moving on.
+4. **Update `autonoma/entity-audit.md` in-place** — change `creation_file` to the new file,
+   `creation_function` to the new exported name, and REMOVE `needs_extraction: true`.
+   Downstream steps read the audit; they must see the fixed state.
+5. Now — and only now — import the new function and wire the factory.
+
+If extraction is genuinely impossible (the inline block depends on `req`/`res` in a way that
+can't be untangled, or it's generated code you can't edit), **STOP and ask the user**. Do
+NOT fall back to raw ORM. That is the bug we are trying to prevent.
+
+**Concrete example — Better Auth `databaseHooks`:**
+
+The audit marks `User` with `needs_extraction: true`, `creation_file: src/auth.ts`,
+`creation_function: buildAuth (databaseHooks.user.create)`. Reading `src/auth.ts`, the real
+creation logic lives inside a closure passed to `betterAuth({ databaseHooks: { user: { create: async (user) => {...} } } })`, which calls `db.user.create`, then `ensureOrgMembership`, then provisions a `BillingCustomer`, then enqueues a welcome email.
+
+Wrong: import `db` and call `db.user.create(...)` in the factory — silently skips the
+Organization/Member/BillingCustomer rows and every downstream test that reads them breaks.
+
+Right: extract the closure body into `export async function createUserWithOnboarding(input)`
+in `src/auth/create-user.ts`, call it from the Better Auth hook (so production still works),
+update the audit, then `import { createUserWithOnboarding }` in the factory.
+
+### Branch 2 — `has_creation_code: true`, no `needs_extraction`
+
+Meaning: a named exported function or class method already exists. Import it and call it.
+Do not copy its body. Do not call the ORM directly "because it's simpler." The whole point
+is to stay on the user's code path.
+
+Go to the DI playbook below to figure out how to invoke it.
+
+### Branch 3 — `has_creation_code: false`
+
+Do not register a factory at all. The SDK's raw SQL fallback handles it. Writing a factory
+here just so you can call `db.<model>.create()` is the anti-pattern in disguise — let the
+SDK do it.
+
+## DI / constructor-injection playbook
+
+Factories receive `(data, ctx)` where `ctx.executor` is the DB client/transaction. That's
+enough for simple service classes but many creation functions need more. Walk this list in
+order — the first match wins:
+
+1. **Top-level exported function** — `import { createX } from "..."; return createX(data);`.
+   Simplest case. Most services should end up here after Branch 1 extraction.
+2. **Static method on a class** — `return XService.create(data, ctx.executor);`. Pass
+   `ctx.executor` as the DB/transaction argument so writes stay in the SDK's transaction.
+3. **Instance method, needs only a DB client** —
+   `const svc = new XService(ctx.executor); return svc.create(data);`. Mirrors how the app
+   instantiates it at call time.
+4. **Instance method, needs more dependencies (logger, event bus, config, clients)** —
+   find the app's composition root (DI container, service registry, `container.ts`,
+   `app.module.ts`, `services/index.ts`) and reuse it. Two viable patterns:
+   - **Import the already-constructed singleton** the app exports for production use:
+     `import { userService } from "@/services"; return userService.create(data);`.
+   - **Rebuild the service the same way the composition root does**, substituting
+     `ctx.executor` for the DB dependency and importing real singletons for everything
+     else (logger, event bus). Do not invent mocks. Example:
+
+     ```ts
+     import { logger, eventBus, temporalClient } from "@/lib/singletons";
+
+     UserProfile: defineFactory({
+       create: async (data, ctx) => {
+         const svc = new UserProfileService({
+           db: ctx.executor,
+           logger,
+           eventBus,
+           temporal: temporalClient,
+         });
+         return svc.create(data);
+       },
+     }),
+     ```
+5. **Framework-scoped dependencies (NestJS provider, Fastify plugin, Rails concern)** —
+   bootstrap the smallest containing module and resolve the service from it. If that turns
+   into a 50-line boilerplate, that's a signal the composition root should expose a helper
+   the factory can call; add the helper to the app and use it. Still never `db.create()`.
+6. **Impossible** — if you genuinely can't wire the dependencies without rewriting the
+   service, STOP and ask the user. Do NOT fall back to raw ORM.
+
+Never mock, stub, or fake a dependency. The factory must exercise real code.
+
+## External side effects policy
+
+Audited creation functions often perform side effects beyond the DB row: enqueueing a
+Temporal workflow, hitting the GitHub/Stripe/Slack API, sending an email, publishing to a
+message bus, writing a semantic embedding, firing an analytics event, calling an LLM.
+
+**Your goal is correct DB state, not production-grade external delivery.** The factory MUST
+preserve every DB write the real function performs (including writes to sibling tables
+done by ORM hooks, framework hooks, triggers). It is NOT responsible for making every
+network call succeed. Order of preference:
+
+1. **Call the real function with real side effects.** If Temporal/GitHub/Stripe clients are
+   already wired for the test environment (sandbox keys, a local Temporal dev server,
+   mocked SDKs in test config), just call through. Cleanest option when infra is available.
+2. **Use the app's existing test-mode toggle.** Most apps have one: an env var
+   (`NODE_ENV=test`, `DISABLE_WORKFLOWS=1`, `ANALYTICS_DISABLED=1`), a feature flag, a
+   null-object client injected in tests. Find it, set it on the handler's environment, and
+   call the real function.
+3. **Wrap external-only calls and let them no-op on failure.** If no toggle exists and the
+   call would fail in the test environment, the acceptable pattern is to try/catch the
+   outbound call inside the real function's wrapper — not inside a rewritten factory body.
+   Prefer exposing a toggle in the app over adding try/catch at the factory layer. Only use
+   this for calls whose failure does not affect DB state under test. If a test later
+   asserts on a row the side effect would have created, make it succeed (option 1 or 2).
+4. **Reimplement the DB writes inline.** NEVER. If you find yourself typing
+   `db.<other_model>.create` inside a factory to replicate what a hook or workflow would
+   have done, STOP. That means the function wasn't truly "called" — you re-wrote it. Go
+   back to option 1 or 2, or ask the user.
+
+**What you are NOT allowed to skip:**
+
+- Password hashing, slug generation, ID derivation, normalisation — pure CPU work inside
+  the creation function; calling the function gets them for free.
+- DB writes performed by ORM hooks / framework hooks / triggers on the model being created.
+  Better Auth's `databaseHooks.user.create` writes to Organization, Member, BillingCustomer
+  — if you call `db.user.create()` instead of the real signup function, those rows go
+  missing and every test that reads them breaks silently.
+- Writes to sibling tables done by the creation function itself (e.g. `createProject`
+  writing a default Folder row). If you don't call the function, those rows go missing too.
+
 ## CRITICAL: Before Writing Any Code
 
 **Ask the user for confirmation** before implementing. Present your plan:
@@ -94,18 +267,24 @@ the audit explicitly determined there's no creation logic to preserve.
 > **Endpoint location**: [where the handler file will go]
 > **Scope field**: [e.g., organizationId]
 >
-> **Factories to register** (from entity-audit.md):
-> - [Model]: calls `[file]#[function]` (side effects: [list, or "none — future-proofs against added logic"])
-> - [Model]: calls `[file]#[function]` (side effects: [list])
+> **Models needing extraction (`needs_extraction: true`)**:
+> - [Model]: inline in `[file]#[block]` → will extract to `[new file]#[new function]`
 > - ...
+>
+> **Factories to register** (from entity-audit.md):
+> - [Model]: calls `[file]#[function]` (DI: [top-level import / `new Service(ctx.executor)` / composition-root singleton]; side effects: [list, or "none — future-proofs against added logic"])
+> - ...
+>
+> **External side effects strategy**: [test-mode toggle name / sandbox credentials / try-catch wrapper]
 >
 > **Raw SQL fallback** (no creation code in audit): [list]
 >
 > **Auth callback**: [how sessions/tokens will be created]
 >
-> **Database operations**: The SDK creates test data via ORM create methods or by calling
-> the factories you register. It deletes only what it created during teardown (verified by
-> a signed token). It cannot UPDATE, DELETE, DROP, or run raw SQL on existing data.
+> **Database operations**: The SDK creates test data by calling the factories you register
+> (or raw SQL for models without creation code). It deletes only what it created during
+> teardown (verified by a signed token). It cannot UPDATE, DELETE, DROP, or run raw SQL on
+> existing data.
 >
 > **Environment variables needed**:
 > - `AUTONOMA_SHARED_SECRET` — shared with Autonoma for HMAC request verification
@@ -145,7 +324,14 @@ Pick the correct packages for the project's stack:
 
 Always install `@autonoma-ai/sdk` as the core package.
 
-### 2. Create the endpoint handler
+### 2. Do the extractions FIRST
+
+Before writing the handler, walk every `needs_extraction: true` model in the audit and do
+the extraction per Branch 1 of the decision tree. After each extraction, update
+`autonoma/entity-audit.md` in-place. This must happen before Step 3 — the handler imports
+these new exports by name.
+
+### 3. Create the endpoint handler
 
 Write a single handler file that:
 1. Imports and configures the ORM adapter with the scope field
@@ -155,11 +341,11 @@ Write a single handler file that:
 
 Match existing codebase patterns — import style, file organization, error handling.
 
-### 3. Register factories (one per model with creation code)
+### 4. Register factories (one per model with creation code)
 
 For every entry in entity-audit.md with `has_creation_code: true`:
 
-- Import the function from `creation_file`
+- Import the function from `creation_file` (post-extraction if Branch 1 applied)
 - Wrap it in `defineFactory({ create, teardown? })` from `@autonoma-ai/sdk`
 - In `create`: call the imported function with the resolved data and return at least `{ id }` (the primary key)
 - Optionally define `teardown` for custom cleanup (SQL DELETE is the default)
@@ -173,11 +359,10 @@ password hashing, audit logs, Stripe sync, state-machine transitions — the tes
 for free. Inline ORM calls bypass all of that silently and are the #1 bug source in generated
 factories.
 
-**Rule of thumb**: in 99% of factories, a raw ORM/DB write MUST NOT appear in the factory
-body. "Raw write" means any call that inserts a row without going through the user's
-creation function. Exact patterns vary by language/ORM — a non-exhaustive list:
+**A raw ORM/DB write MUST NEVER appear in a factory body for a `has_creation_code: true`
+model.** There are no exceptions. Exact patterns vary by language/ORM — a non-exhaustive list:
 
-- TypeScript/JavaScript: `prisma.<m>.create(`, `db.<m>.create(`, `tx.insert(`, `drizzle.insert(`, `knex('<t>').insert(`, `sequelize.models.<M>.create(`, `typeorm.getRepository(...).save(`, `mongoose.Model.create(`, `await <M>.create(`
+- TypeScript/JavaScript: `prisma.<m>.create(`, `db.<m>.create(`, `tx.insert(`, `drizzle.insert(`, `knex('<t>').insert(`, `sequelize.models.<M>.create(`, `typeorm.getRepository(...).save(`, `mongoose.Model.create(`, `await <M>.create(`, `.upsert(`
 - Python: `session.add(`, `session.execute(insert(...))`, `Model.objects.create(`, `Model(...).save(`, `db.session.add(`, `conn.execute("INSERT ...")`
 - Ruby/Rails: `<Model>.create(`, `<Model>.create!(`, `<Model>.new(...).save`, `<Model>.insert(`, `ActiveRecord::Base.connection.execute("INSERT ...")`
 - PHP/Laravel: `<Model>::create(`, `new <Model>(...)->save()`, `DB::table('...')->insert(`, `$repository->persist(`
@@ -188,34 +373,8 @@ creation function. Exact patterns vary by language/ORM — a non-exhaustive list
 - Raw SQL anywhere: an `INSERT INTO <table>` string literal passed to a query/exec/prepare API
 
 If you wrote one of these inside a factory body for a model whose audit says
-`has_creation_code: true`, you took the trap. Back out and call the audited function.
-
-#### When the audit points at a route handler (no exported function exists)
-
-Sometimes `entity-audit.md` says `has_creation_code: true` but the `creation_file` is a
-route handler and the `creation_function` is an inline arrow/closure like
-`(req, res) => { db.x.create(...) }`. That means the creation logic exists but isn't
-reusable yet.
-
-**Do not copy-paste the route's body into the factory.** That's just inline ORM with extra
-steps. Instead:
-
-1. **Extract the creation logic into a named exported function** in the nearest sensible
-   module (a new `*.service.ts`, `*.repository.ts`, or a sibling `create-<model>.ts` next to
-   the route file). The function should take a plain input object (no `req`/`res`) and
-   return the created record.
-2. **Replace the route handler's body** with a call to the new exported function — the
-   behavior for real HTTP callers must stay identical. Run typecheck/tests after the
-   extraction.
-3. **Import the new function in the factory** and invoke it from `create`.
-4. **Update `autonoma/entity-audit.md`** in-place: change `creation_file` to the new file
-   and `creation_function` to the new exported name, so downstream steps (validator, future
-   regenerations) see the fixed audit.
-
-This refactor is part of the job, not an optional nice-to-have. Inlining the route body
-into a factory defeats the whole purpose. If the route body is so entangled with `req`/`res`
-that extraction is genuinely impossible, STOP and ask the user — do not paper over it with
-inline ORM.
+`has_creation_code: true`, you took the trap. Delete it. Go back to the per-model decision
+tree and the DI playbook.
 
 **WRONG — re-implementing creation logic inline (this is the trap):**
 
@@ -243,29 +402,11 @@ OnboardingState: defineFactory({
 }),
 ```
 
-#### How to instantiate wrapper classes
-
-If `creation_function` is a method on a class (service, manager, repository), you need an
-instance. Use the SDK's factory context — it carries the shared DB executor you should pass
-into the constructor:
-
-- `ctx.executor` — the DB client/transaction the SDK is using for this `up` call. Pass this
-  into constructors that take `db`/`tx`/`client`/`prisma`/`drizzle`. Using it keeps factory
-  writes inside the same transaction as the rest of the `up` operation.
-- If the class needs more than a DB client (e.g. a logger, event bus, config), import the
-  real instances the app already constructs. Don't mock them — the whole point is to run
-  the real code path.
-- If the class is a singleton exported from a module, import it directly and call the method.
-
-If a creation function has a non-standard signature (e.g., takes a context object, or returns
-a non-standard shape), adapt the factory to bridge the gap — but do NOT reimplement the logic.
-Always call the user's function.
-
-### 4. Register the route
+### 5. Register the route
 
 Add the endpoint to the app's routing.
 
-### 5. Set up environment variables
+### 6. Set up environment variables
 
 Add `AUTONOMA_SHARED_SECRET` and `AUTONOMA_SIGNING_SECRET` to `.env`. If `.env.example` exists, add placeholders.
 
@@ -300,7 +441,9 @@ static analysis, not a vibe check. Run it yourself and HALT if it fails — the 
 ### Step A — collect the audit targets
 
 Parse `autonoma/entity-audit.md` and build a list of `(model, creation_file, creation_function)`
-for every model with `has_creation_code: true`.
+for every model with `has_creation_code: true`. Also flag any entry that still has
+`needs_extraction: true` — that's a bug (you were supposed to extract first and clear the
+flag). HALT and go do the extraction.
 
 ### Step B — grep the handler for the anti-pattern
 
@@ -329,19 +472,19 @@ For each `(model, creation_file, creation_function)` from Step A, verify ALL of:
 3. The factory body does NOT contain a raw ORM write for `model` (`db.<model>.create(...)`,
    `prisma.<model>.create(...)`, `tx.insert(<model>Table)`, etc.).
 
-If any model fails any of the three, STOP. Fix the factory per the rules in
-"The one thing you MUST NOT do" and "When the audit points at a route handler", then re-run
-this check from Step A.
+If any model fails any of the three, STOP. Fix the factory per the per-model decision tree
+and the DI playbook, then re-run this check from Step A.
 
 ### Step D — commit only when clean
 
 Only write `autonoma/.endpoint-implemented` after:
+- Every `needs_extraction: true` flag in the audit has been resolved.
 - Step B returns zero anti-pattern matches inside factory bodies.
 - Step C passes for every audited model.
 - The discover smoke test returns 200 with the expected schema shape.
 
-If you extracted any route-handler logic into a new exported function (per the earlier
-directive), the audit must have been updated in-place; re-read it after the edit before
+If you extracted any route-handler or framework-hook logic into a new exported function
+(per Branch 1), the audit must have been updated in-place; re-read it after the edit before
 running Step A.
 
 ## CRITICAL: Write the implementation sentinel
@@ -354,6 +497,7 @@ Endpoint implemented.
 - handler: <path>
 - packages: <list>
 - factories registered: <count>
+- extractions performed: <count, with from→to paths>
 - scope field: <field>
 - auth callback: <brief description>
 ```
@@ -369,15 +513,17 @@ After implementation and validation, explain:
 
 1. **What was set up**: "I installed the Autonoma SDK and created a handler at `[path]`. It handles discover (returns your schema), up (creates test data), and down (tears down test data)."
 
-2. **Factories registered**: List each factory — which function it wraps and what side effects the audit observed (or "none — factory is registered to future-proof").
+2. **Extractions performed**: For each `needs_extraction: true` model, show the inline block → new exported function mapping, and confirm the original caller now invokes the new function.
 
-3. **Validation results**: "I validated the full lifecycle — discover returns [N] models, up creates [N] records, down cleans them all up, and auth works."
+3. **Factories registered**: List each factory — which function it wraps, which DI pattern was used, and what side effects the audit observed (or "none — factory is registered to future-proof").
 
-4. **How to set up secrets**: "Generate two secrets with `openssl rand -hex 32` and set them as:
+4. **External side effects strategy**: which toggle/sandbox/wrapper was used.
+
+5. **How to set up secrets**: "Generate two secrets with `openssl rand -hex 32` and set them as:
    - `AUTONOMA_SHARED_SECRET` — share this with Autonoma
    - `AUTONOMA_SIGNING_SECRET` — keep this private"
 
-5. **Safety**: "The SDK can only INSERT records via ORM create methods or the factories you registered. Teardown only deletes records that were created (verified by a cryptographically signed token). It cannot UPDATE, DELETE, DROP, or run raw SQL on existing data."
+6. **Safety**: "The SDK can only INSERT records via the factories you registered (which call the user's real creation functions) or raw SQL for models without creation code. Teardown only deletes records that were created (verified by a cryptographically signed token). It cannot UPDATE, DELETE, DROP, or run raw SQL on existing data."
 
 ## Important
 
@@ -385,7 +531,9 @@ After implementation and validation, explain:
 - Match existing code patterns and conventions
 - Use the same ORM/database layer the project already uses
 - Register factories for EVERY model with `has_creation_code: true` in the audit — no exceptions, even for thin wrappers
+- Resolve every `needs_extraction: true` by extracting FIRST, then wiring the factory
 - Never reimplement the user's creation logic in a factory — always call their function
+- `db.<model>.create()` in a factory for a `has_creation_code: true` model is NEVER acceptable
 - ALL database writes go through the SDK endpoint — never write directly
 - Use `testRunId` to make unique fields (emails, org names) to prevent parallel test collisions
 - Validate the FULL lifecycle (discover → up → verify → down → verify) before completing
