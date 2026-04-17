@@ -1,8 +1,9 @@
 ---
 description: >
-  Installs the Autonoma SDK, configures the handler by registering factories for
-  every model with dedicated creation code (from entity-audit.md), and validates
-  the scenario lifecycle (discover/up/down).
+  Installs the Autonoma SDK and configures the handler by registering factories for
+  every model with dedicated creation code (from entity-audit.md). Writes
+  autonoma/.endpoint-implemented on completion. End-to-end validation happens in the
+  next step (scenario-validator).
 tools:
   - Read
   - Glob
@@ -15,11 +16,12 @@ tools:
 maxTurns: 60
 ---
 
-# Environment Factory: SDK Setup & Validation
+# Environment Factory: SDK Setup
 
-You install the Autonoma SDK, configure the handler with factories, and validate the scenario lifecycle.
-Your inputs are `autonoma/scenarios.md` and `autonoma/entity-audit.md`. Your output is a working
-endpoint with validated `up`/`down` lifecycle.
+You install the Autonoma SDK and configure the handler with factories.
+Your inputs are `autonoma/scenarios.md` and `autonoma/entity-audit.md`. Your output is an
+endpoint that responds to `discover` — end-to-end validation (`up`/`down`) happens in the
+next pipeline step.
 
 ## CRITICAL: Database Safety
 
@@ -223,113 +225,69 @@ Add the endpoint to the app's routing.
 
 Add `AUTONOMA_SHARED_SECRET` and `AUTONOMA_SIGNING_SECRET` to `.env`. If `.env.example` exists, add placeholders.
 
-## CRITICAL: Validate Within the Session
+## Smoke test
 
-After implementing, you MUST validate the full lifecycle. This is the gate — do not complete without passing.
+Before writing the sentinel, run a single `discover` call to confirm the endpoint is wired
+up and HMAC works. Do NOT run `up` or `down` here — that is the scenario-validator's job.
 
-1. **Check if the dev server is running** or start it
+```bash
+export AUTONOMA_SHARED_SECRET=${AUTONOMA_SHARED_SECRET:-$(openssl rand -hex 32)}
+export AUTONOMA_SIGNING_SECRET=${AUTONOMA_SIGNING_SECRET:-$(openssl rand -hex 32)}
 
-2. **Generate temporary secrets** for testing:
-   ```bash
-   export AUTONOMA_SHARED_SECRET=$(openssl rand -hex 32)
-   export AUTONOMA_SIGNING_SECRET=$(openssl rand -hex 32)
-   ```
+BODY='{"action":"discover"}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
+curl -s -X POST http://localhost:PORT/api/autonoma \
+  -H "Content-Type: application/json" \
+  -H "x-signature: $SIG" \
+  -d "$BODY" | python3 -m json.tool
+```
 
-3. **Test discover**:
-   ```bash
-   BODY='{"action":"discover"}'
-   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
-   curl -s -X POST http://localhost:PORT/api/autonoma \
-     -H "Content-Type: application/json" \
-     -H "x-signature: $SIG" \
-     -d "$BODY" | python3 -m json.tool
-   ```
-   **Expected**: JSON with `schema` containing `models`, `edges`, `relations`, `scopeField`.
+Expected: JSON with `schema.models`, `schema.edges`, `schema.relations`, `schema.scopeField`.
 
-4. **Test up** (build the create tree from scenarios.md):
-   ```bash
-   BODY='{"action":"up","create":{...},"testRunId":"test-001"}'
-   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
-   UP=$(curl -s -X POST http://localhost:PORT/api/autonoma \
-     -H "Content-Type: application/json" \
-     -H "x-signature: $SIG" \
-     -d "$BODY")
-   echo "$UP" | python3 -m json.tool
-   ```
-   **Expected**: JSON with `auth`, `refs` (created records keyed by model), `refsToken`.
+If this fails, fix the handler (likely the adapter config or route mount) before writing
+the sentinel.
 
-5. **Verify data exists** (read-only DB query — SELECT only, never write)
+## CRITICAL: Factory-integrity check (before writing the sentinel)
 
-6. **Test down**:
-   ```bash
-   TOKEN=$(echo "$UP" | python3 -c "import sys,json; print(json.load(sys.stdin)['refsToken'])")
-   BODY=$(python3 -c "import json; print(json.dumps({'action':'down','refsToken':'$TOKEN'}))")
-   SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AUTONOMA_SHARED_SECRET" | sed 's/.*= //')
-   curl -s -X POST http://localhost:PORT/api/autonoma \
-     -H "Content-Type: application/json" \
-     -H "x-signature: $SIG" \
-     -d "$BODY" | python3 -m json.tool
-   ```
-   **Expected**: `{ "ok": true }`
+Prove every factory calls the audit's identified `creation_function`. This is static
+analysis, not a vibe check:
 
-7. **Verify data was cleaned up** (read-only DB query — no orphans should remain)
-
-8. **Test auth**: Use the cookies/headers/token from `up` to make an authenticated request.
-
-If any test fails, fix the implementation and re-test.
-
-## CRITICAL: Factory-integrity check (run before writing the sentinel)
-
-Before writing the validation sentinel, prove that every factory you registered actually
-calls the audit's identified `creation_function`. This is a deterministic check, not a vibe:
-
-1. Parse `autonoma/entity-audit.md` and list every model with `has_creation_code: true` along
+1. Parse `autonoma/entity-audit.md` and list every model with `has_creation_code: true`
    with its `creation_file` and `creation_function`.
-2. For each such model, open the handler file(s) you wrote and verify BOTH:
+2. For each such model, open the handler file(s) and verify BOTH:
    - An `import` (or `require`) line pulls in `creation_function` (or the class that owns it)
      from a path that resolves to `creation_file`.
    - Inside that model's `defineFactory({ create })` body, the identified symbol is actually
      invoked (e.g. `manager.getState(...)`, `createUser(...)`, `ProjectService.create(...)`).
-3. If either check fails for any model — import missing, or the factory body only touches the
-   raw ORM (`db.x.create`, `prisma.x.create`, `tx.insert(...)`, etc.) — the factory is
-   re-implementing logic instead of calling it. **STOP**, fix the factory to call the real
-   function (see the WRONG/RIGHT example above), and re-run validation before proceeding.
+3. If either check fails for any model — import missing, or the factory body only touches
+   the raw ORM (`db.x.create`, `prisma.x.create`, `tx.insert(...)`) — STOP, fix it, re-run.
 
-A quick way to spot the anti-pattern on Prisma projects:
+A quick anti-pattern grep for Prisma projects:
 
 ```bash
 grep -nE '(prisma|db|tx)\.[a-zA-Z]+\.create\(' <your-handler-file> || echo "no inline ORM creates — good"
 ```
 
-Every match on that grep is a candidate for the trap. Cross-reference each against the audit:
-if the same model has `has_creation_code: true`, you need to replace the inline call with
-the real function.
+Every match is a candidate for the trap.
 
-Do NOT write the sentinel below until this check passes for every model in the audit.
+## CRITICAL: Write the implementation sentinel
 
-## CRITICAL: Write the validation sentinel
-
-**Only after every lifecycle step above has passed** (discover OK, up OK, data verified,
-down OK, cleanup verified, auth OK) **and the factory-integrity check passes**, create the
-sentinel file the orchestrator hook watches.
-
-**Use the `Write` tool** to create `autonoma/.env-factory-validated`. Do NOT use `touch`
-or any other Bash command — the plugin's PostToolUse hook only fires on `Write`/`Edit`, so
-a Bash `touch` will silently skip the step 3→4 transition and leave the dashboard stuck.
-
-The file body should be a short plain-text summary of what you validated, e.g.:
+After the discover smoke test passes AND the factory-integrity check passes, use the
+`Write` tool to create `autonoma/.endpoint-implemented` with a short plain-text summary:
 
 ```
-Environment Factory validation passed.
-- discover: 8 models, 12 edges, scopeField=organizationId
-- up(standard): created 14 records across 5 models, refsToken issued
-- data verified via read-only SELECT
-- down: 14 records removed, cleanup verified
-- auth test: authenticated request returned 200
+Endpoint implemented.
+- handler: <path>
+- packages: <list>
+- factories registered: <count>
+- scope field: <field>
+- auth callback: <brief description>
 ```
 
-Do NOT write this file if any validation step failed, and do NOT write it before validation —
-it is the pipeline's only signal that the Environment Factory actually works.
+Do NOT use `touch` — the hook fires only on `Write`/`Edit`.
+
+The next step (scenario-validator) will exercise up/down for every scenario and write
+`autonoma/.endpoint-validated`. E2E test generation is blocked until that happens.
 
 ## What to Explain to the User
 

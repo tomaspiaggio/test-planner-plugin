@@ -116,22 +116,29 @@ print(json.dumps({'testCases': test_cases}))
 
 # ----------------------------------------------------------------------------
 # Sentinel files: no validation, just event emission.
-#   - autonoma/.env-factory-validated — env-factory agent writes this after the
-#     full up/down lifecycle passes; signals step 3 complete.
+#   - autonoma/.endpoint-implemented — env-factory agent writes this after the
+#     discover smoke test + factory-integrity check pass; signals step 3 complete.
+#   - autonoma/.endpoint-validated — scenario-validator writes this after the full
+#     up/down lifecycle passes for every scenario; signals step 4 complete AND
+#     unlocks the gate that allows qa-tests/*.md to be written.
 #   - autonoma/.step-<N>-ack — orchestrator writes this AFTER the user has
 #     confirmed via AskUserQuestion; this is the *only* path that emits
 #     step.started for step N. The UI can therefore show "waiting for
 #     confirmation" in the gap between step.completed (N-1) and step.started N.
 # ----------------------------------------------------------------------------
-STEP_NAMES=("Knowledge Base" "Entity Audit" "Scenarios" "Implement & Validate" "E2E Tests")
+STEP_NAMES=("Knowledge Base" "Entity Audit" "Scenarios" "Implement" "Validate" "E2E Tests")
 
 case "$FILE_PATH" in
-  */autonoma/.env-factory-validated)
-    emit_step_event 3 completed "Implement & Validate"
+  */autonoma/.endpoint-implemented)
+    emit_step_event 3 completed "Implement"
+    exit 0
+    ;;
+  */autonoma/.endpoint-validated)
+    emit_step_event 4 completed "Validate"
     exit 0
     ;;
   */autonoma/.pipeline-complete)
-    emit_step_event 4 completed "E2E Tests"
+    emit_step_event 5 completed "E2E Tests"
     exit 0
     ;;
   */autonoma/.step-*-ack)
@@ -140,6 +147,20 @@ case "$FILE_PATH" in
       emit_step_event "$ack_num" started "${STEP_NAMES[$ack_num]}"
     fi
     exit 0
+    ;;
+esac
+
+# ----------------------------------------------------------------------------
+# Validation gate: test files (INDEX.md or any qa-tests/*.md) cannot be written
+# until the scenario-validator writes autonoma/.endpoint-validated. This
+# prevents step 6 from generating tests against an unproven endpoint.
+# ----------------------------------------------------------------------------
+case "$FILE_PATH" in
+  */autonoma/qa-tests/INDEX.md|*/autonoma/qa-tests/*.md)
+    if [ ! -f "autonoma/.endpoint-validated" ]; then
+      echo "VALIDATION GATE: Cannot write $FILE_PATH — autonoma/.endpoint-validated is missing. Complete Step 5 (scenario-validator) first. The validator must run discover/up/down against every scenario and write the sentinel before test generation is allowed." >&2
+      exit 2
+    fi
     ;;
 esac
 
@@ -185,12 +206,12 @@ case "$FILE_PATH" in
     STEP_COMPLETED=2
     STEP_COMPLETED_NAME="Scenarios"
     STEP_STARTED=3
-    STEP_STARTED_NAME="Implement & Validate"
+    STEP_STARTED_NAME="Implement"
     ;;
   */autonoma/qa-tests/INDEX.md)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_test_index.py"
     VALIDATOR_NAME="validate-test-index"
-    STEP_COMPLETED=4
+    STEP_COMPLETED=5
     STEP_COMPLETED_NAME="E2E Tests"
     POST_UPLOAD="test_cases"
     ;;
