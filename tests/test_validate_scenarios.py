@@ -22,6 +22,11 @@ scenarios:
 entity_types:
   - name: user
   - name: task
+variable_fields: []
+planning_sections:
+  - schema_summary
+  - relationship_map
+  - variable_data_strategy
 ---
 
 # Scenarios

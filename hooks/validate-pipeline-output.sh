@@ -208,6 +208,14 @@ case "$FILE_PATH" in
     STEP_STARTED=3
     STEP_STARTED_NAME="Implement"
     ;;
+  */autonoma/scenario-recipes.json)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenario_recipes.py"
+    VALIDATOR_NAME="validate-scenario-recipes"
+    ;;
+  */autonoma/.scenario-validation.json)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenario_validation.py"
+    VALIDATOR_NAME="validate-scenario-validation"
+    ;;
   */autonoma/qa-tests/INDEX.md)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_test_index.py"
     VALIDATOR_NAME="validate-test-index"

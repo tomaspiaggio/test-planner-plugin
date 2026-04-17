@@ -73,4 +73,60 @@ for i, e in enumerate(et):
         print(f'entity_types[{i}] must be a mapping with at least a "name" field')
         sys.exit(1)
 
+# Validate variable_fields (required, may be empty list)
+if 'variable_fields' not in fm:
+    print('Missing required frontmatter field: variable_fields (use [] if none)')
+    sys.exit(1)
+
+scenario_name_set = {s['name'] for s in scenarios}
+variable_fields = fm.get('variable_fields')
+if not isinstance(variable_fields, list):
+    print('variable_fields must be a list')
+    sys.exit(1)
+
+for i, variable in enumerate(variable_fields):
+    if not isinstance(variable, dict):
+        print(f'variable_fields[{i}] must be a mapping')
+        sys.exit(1)
+    for field in ['token', 'entity', 'scenarios', 'reason', 'test_reference']:
+        if field not in variable:
+            print(f'variable_fields[{i}] missing required field: {field}')
+            sys.exit(1)
+
+    token = variable.get('token')
+    if not isinstance(token, str) or len(token) < 5 or not token.startswith('{{') or not token.endswith('}}'):
+        print(f'variable_fields[{i}].token must use double curly braces, e.g. {{title}}')
+        sys.exit(1)
+
+    for field in ['entity', 'reason', 'test_reference']:
+        value = variable.get(field)
+        if not isinstance(value, str) or len(value.strip()) == 0:
+            print(f'variable_fields[{i}].{field} must be a non-empty string')
+            sys.exit(1)
+
+    vscenarios = variable.get('scenarios')
+    if not isinstance(vscenarios, list) or len(vscenarios) == 0:
+        print(f'variable_fields[{i}].scenarios must be a non-empty list')
+        sys.exit(1)
+    for name in vscenarios:
+        if name not in scenario_name_set:
+            print(f'variable_fields[{i}].scenarios references unknown scenario: {name}')
+            sys.exit(1)
+
+# Validate planning_sections (required; must contain the four core sections)
+if 'planning_sections' not in fm:
+    print('Missing required frontmatter field: planning_sections')
+    sys.exit(1)
+
+planning = fm.get('planning_sections')
+if not isinstance(planning, list) or len(planning) == 0:
+    print('planning_sections must be a non-empty list')
+    sys.exit(1)
+
+required_sections = {'schema_summary', 'relationship_map', 'variable_data_strategy'}
+missing_sections = required_sections - set(planning)
+if missing_sections:
+    print(f'planning_sections missing required entries: {sorted(missing_sections)}')
+    sys.exit(1)
+
 print('OK')

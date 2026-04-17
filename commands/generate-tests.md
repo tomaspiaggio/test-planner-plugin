@@ -62,8 +62,12 @@ After completion: present the audit, `AskUserQuestion`, `Write` `autonoma/.step-
 
 Spawn `scenario-generator`:
 
-> Read the knowledge base. Generate test data scenarios. Write `autonoma/scenarios.md` with
-> frontmatter (scenario_count, scenarios summary, entity_types).
+> Read the knowledge base and `autonoma/entity-audit.md`. Generate test data scenarios. Write
+> `autonoma/scenarios.md` with frontmatter (scenario_count, scenarios summary, entity_types,
+> variable_fields, planning_sections). Mark values as variable only when they must vary across
+> runs (globally unique, time-sensitive, backend-generated, or when the app lacks natural
+> per-run isolation). Design entity tables so they serialise as nested trees rooted at the
+> scope entity.
 > Fetch: `curl -sSfL "$(cat autonoma/.docs-url)/llms/test-planner/step-2-scenarios.txt"`.
 
 After completion: present scenarios, `AskUserQuestion`, `Write` `autonoma/.step-3-ack`.
@@ -93,27 +97,80 @@ Spawn `scenario-validator`:
 > Run `discover`/`up`/`down` against every scenario with HMAC-signed curl. Iterate (up to 5
 > times): if a scenario fails because of a handler bug, fix the handler and retry; if it fails
 > because the scenario itself is wrong/unfeasible, edit `scenarios.md` to match reality. On
-> success for every scenario, `Write` `autonoma/.endpoint-validated` with a summary. If you
-> hit the iteration cap, STOP and report — do NOT write the sentinel.
+> success for every scenario, emit `autonoma/scenario-recipes.json` (nested tree rooted at
+> the scope entity; `variables` block for any `{{token}}` placeholders; one validated recipe
+> per scenario), run `preflight_scenario_recipes.py` against it, and write
+> `autonoma/.scenario-validation.json` as the terminal artifact. Then `Write`
+> `autonoma/.endpoint-validated`. If you hit the iteration cap OR preflight fails, STOP and
+> report — do NOT write the sentinel.
 > Verify: every audited model appears in `discover.schema.models`, every `has_creation_code`
-> model has a registered factory, `auth` is non-empty, and DB state is correct before and after
-> `down`.
+> model has a registered factory, `auth` is non-empty, DB state is correct before and after
+> `down`, and preflight exits 0.
 
 After completion:
-1. If `autonoma/.endpoint-validated` exists: present validation summary (scenarios passed,
-   any edits made to `scenarios.md`), `AskUserQuestion`, `Write` `autonoma/.step-5-ack`.
-2. If it does NOT exist: the agent failed — surface the failure report to the user and STOP.
-   Do NOT proceed to step 6. The validation gate in the hook will also block test file writes.
+1. If `autonoma/.endpoint-validated` exists AND `autonoma/scenario-recipes.json` is valid JSON
+   AND `autonoma/.scenario-validation.json` has `status: "ok"` with `preflightPassed: true`:
+   enforce and upload the recipes to the dashboard, then ack.
+
+   ```bash
+   AUTONOMA_ROOT="${AUTONOMA_ROOT:-.}"
+   VALIDATION_ARTIFACT="$AUTONOMA_ROOT/autonoma/.scenario-validation.json"
+   RECIPE_PATH="$AUTONOMA_ROOT/autonoma/scenario-recipes.json"
+
+   # Enforce terminal artifact contract
+   python3 - "$VALIDATION_ARTIFACT" <<'PY'
+   import json, sys
+   payload = json.load(open(sys.argv[1]))
+   if payload.get("status") != "ok":
+       raise SystemExit("status must be ok before Step 5 can upload recipes")
+   if payload.get("preflightPassed") is not True:
+       raise SystemExit("preflightPassed must be true before Step 5 can upload recipes")
+   PY
+
+   [ -s "$RECIPE_PATH" ] || { echo "scenario-recipes.json missing or empty"; exit 1; }
+   python3 -c "import json; json.load(open('$RECIPE_PATH'))" \
+     || { echo "scenario-recipes.json is not valid JSON"; exit 1; }
+
+   # Re-run preflight at the orchestrator level for belt-and-suspenders safety.
+   python3 "$(cat /tmp/autonoma-plugin-root)/hooks/preflight_scenario_recipes.py" "$RECIPE_PATH" \
+     || { echo "Preflight failed at orchestrator gate"; exit 1; }
+
+   # Upload to dashboard
+   GENERATION_ID=$(cat "$AUTONOMA_ROOT/autonoma/.generation-id")
+   UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+     "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/scenario-recipe-versions" \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer ${AUTONOMA_API_TOKEN}" \
+     -d @"$RECIPE_PATH")
+   UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | grep -o "HTTP_STATUS:[0-9]*" | cut -d: -f2)
+   UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '/HTTP_STATUS:/d')
+   echo "Scenario recipe upload response (HTTP $UPLOAD_STATUS): $UPLOAD_BODY"
+   if [ "$UPLOAD_STATUS" != "200" ] && [ "$UPLOAD_STATUS" != "201" ]; then
+     echo "Recipe upload failed (HTTP $UPLOAD_STATUS). Step 5 cannot complete." >&2
+     exit 1
+   fi
+   ```
+
+   Then present validation summary (scenarios passed, any edits made to `scenarios.md`,
+   recipes uploaded), `AskUserQuestion`, `Write` `autonoma/.step-5-ack`.
+
+2. If any of those artifacts are missing/invalid: the agent failed — surface the failure
+   report to the user and STOP. Do NOT proceed to step 6. The validation gate in the hook
+   will also block test file writes.
 
 ## Step 6: Generate E2E Test Cases
 
 Spawn `test-case-generator`:
 
 > Read `autonoma/AUTONOMA.md`, `autonoma/skills/`, and `autonoma/scenarios.md` (the latter has
-> been reconciled with reality in step 5 — use it as the source of truth). Generate test cases
-> in `autonoma/qa-tests/`. Write `autonoma/qa-tests/INDEX.md` with frontmatter (total_tests,
-> total_folders, folder breakdown, coverage_correlation). Each test file needs frontmatter
-> (title, description, criticality, scenario, flow).
+> been reconciled with reality in step 5 — use it as the source of truth). Parse the
+> `variable_fields` frontmatter — test steps MUST use the `{{token}}` placeholders for any
+> variable value (typed, asserted, or navigated to), never the hardcoded literal.
+> Treat scenarios as fixture input, not as the subject under test — do NOT generate meta-tests
+> that "audit" seeded counts or fixture existence.
+> Generate test cases in `autonoma/qa-tests/`. Write `autonoma/qa-tests/INDEX.md` with
+> frontmatter (total_tests, total_folders, folder breakdown, coverage_correlation). Each test
+> file needs frontmatter (title, description, criticality, scenario, flow).
 > Fetch: `curl -sSfL "$(cat autonoma/.docs-url)/llms/test-planner/step-3-e2e-tests.txt"`.
 
 After completion:
@@ -129,5 +186,5 @@ Summarize each step:
 - **Step 2**: entity audit — factories vs raw SQL
 - **Step 3**: scenarios generated
 - **Step 4**: endpoint implemented (handler path, packages, factories registered)
-- **Step 5**: lifecycle validated, scenarios.md edits (if any)
+- **Step 5**: lifecycle validated, scenario-recipes.json emitted, preflight passed, recipes uploaded, scenarios.md edits (if any)
 - **Step 6**: test count, folder breakdown

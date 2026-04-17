@@ -35,6 +35,13 @@ generator (step 6) is gated on your sentinel — if you do not write
 - `autonoma/scenarios.md` — scenario definitions (may contain mistakes you will correct)
 - The handler file created in step 4
 - A running dev server (start one if it is not up — ask the user for the port)
+- `AUTONOMA_SDK_ENDPOINT` and `AUTONOMA_SHARED_SECRET` (for HMAC signing + preflight)
+
+## Outputs
+
+- `autonoma/scenario-recipes.json` — validated nested `create` trees per scenario
+- `autonoma/.scenario-validation.json` — terminal artifact the orchestrator reads
+- `autonoma/.endpoint-validated` — sentinel that gates Step 6 (test generation)
 
 ## The loop
 
@@ -114,16 +121,111 @@ Repeat until all three actions succeed for every scenario OR you exhaust 5 itera
    6. POST `{action:"down", refsToken}`. Expect `{ok:true}`.
    7. Verify the refs rows are gone.
 
-5. Only after every scenario passes cleanly, write the sentinel.
+5. After every scenario passes cleanly, emit the scenario recipes.
 
-   Use the `Write` tool (NOT `touch` — the hook fires only on `Write`/`Edit`) to create
-   `autonoma/.endpoint-validated` with a short plain-text report:
+   Write `autonoma/scenario-recipes.json` with this shape (recipes mirror the `create`
+   trees you just validated — one entry per scenario):
+
+   ```json
+   {
+     "version": 1,
+     "source": {
+       "scenariosPath": "autonoma/scenarios.md"
+     },
+     "validationMode": "endpoint-lifecycle",
+     "recipes": [
+       {
+         "name": "standard",
+         "description": "Realistic dataset for core flows",
+         "create": {
+           "Organization": [{
+             "_alias": "org1",
+             "name": "Acme Corp"
+           }]
+         },
+         "variables": {
+           "testRunId": {
+             "strategy": "derived",
+             "source": "testRunId",
+             "format": "{testRunId}"
+           }
+         },
+         "validation": {
+           "status": "validated",
+           "method": "endpoint-up-down",
+           "phase": "ok",
+           "up_ms": 12,
+           "down_ms": 8
+         }
+       }
+     ]
+   }
+   ```
+
+   Rules:
+   - top-level keys MUST be exactly `version`, `source`, `validationMode`, `recipes`
+   - `version` must be integer `1`
+   - `validationMode` must be `sdk-check` or `endpoint-lifecycle` (use `endpoint-lifecycle`
+     when you drove up/down via HTTP in the loop above)
+   - `recipes` MUST include `standard`, `empty`, and `large`
+   - every recipe MUST contain `name`, `description`, `create`, and `validation`
+   - every `validation` object MUST contain `status: "validated"`, `phase: "ok"`, and a
+     valid `method` (one of `checkScenario`, `checkAllScenarios`, `endpoint-up-down`)
+   - **Nested tree**: `create` MUST use a nested tree rooted at the scope entity. Do NOT
+     use flat top-level model keys connected only by `_ref`. Nest children under their
+     parent using relation field names. Use `_ref` only for cross-branch references that
+     cannot be expressed through nesting.
+   - **Variables**: if `create` contains `{{token}}` placeholders, include a `variables`
+     object. Every `{{token}}` in `create` must match a key in `variables`; every key
+     in `variables` must be used in `create`. Fully concrete recipes do not need `variables`.
+     Allowed strategies: `literal`, `derived`, `faker`. Any collision-prone unique value
+     must be derived from `testRunId`.
+   - Do NOT write the legacy shape — no top-level `generatedAt`, no top-level `scenarios`,
+     no per-recipe `validated`, no per-recipe `timing`.
+
+6. Run preflight on the emitted recipes:
+
+   ```bash
+   python3 "$(cat /tmp/autonoma-plugin-root)/hooks/preflight_scenario_recipes.py" \
+     autonoma/scenario-recipes.json
+   ```
+
+   This resolves tokenized payloads and re-runs signed up/down against the live endpoint.
+   Requires `AUTONOMA_SDK_ENDPOINT` and `AUTONOMA_SHARED_SECRET` in the environment.
+
+   If preflight exits non-zero, fix the failing recipe (or the corresponding scenario) and
+   re-run. Do NOT proceed to step 7 until preflight passes.
+
+7. Write the terminal artifact `autonoma/.scenario-validation.json` with this shape:
+
+   ```json
+   {
+     "status": "ok",
+     "preflightPassed": true,
+     "smokeTestPassed": true,
+     "validatedScenarios": ["standard", "empty", "large"],
+     "failedScenarios": [],
+     "blockingIssues": [],
+     "recipePath": "autonoma/scenario-recipes.json",
+     "validationMode": "endpoint-lifecycle",
+     "endpointUrl": "http://localhost:3000/api/autonoma"
+   }
+   ```
+
+   On failure keep the same shape with `status: "failed"`, `preflightPassed: false` when
+   preflight did not pass, populated `failedScenarios`, and concrete `blockingIssues`.
+
+8. Write the sentinel `autonoma/.endpoint-validated`.
+
+   Use the `Write` tool (NOT `touch` — the hook fires only on `Write`/`Edit`) with a short
+   plain-text report:
 
    ```
    Validated N scenarios across M models.
    - discover: all audited models present, all has_creation_code factories registered
    - up: all N scenarios created successfully, auth returned {cookies|headers|token}
    - down: all N scenarios cleaned up, no orphans
+   - recipes: autonoma/scenario-recipes.json emitted, preflight passed
    - scenarios.md edits: <list of changes you made, or "none">
    ```
 
