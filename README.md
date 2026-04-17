@@ -58,6 +58,72 @@ Implements or completes the backend Environment Factory so the planned scenarios
 
 **You review**: where the Environment Factory lives, what changed, whether a smoke `discover` → `up` → `down` check passed, and whether `standard`, `empty`, and `large` all passed lifecycle validation.
 
+---
+
+## Autonoma Ad Hoc Planner
+
+A second plugin in this repository that runs the same 4-step pipeline but scopes Step 3 to a user-defined focus area. Use it when you want targeted test coverage for a specific feature without regenerating your full test suite.
+
+### Install
+
+**Step 1:** The marketplace is the same as above. If you've already added it, skip this:
+
+```
+/plugin marketplace add Autonoma-AI/test-planner-plugin
+```
+
+**Step 2:** Install the ad hoc plugin:
+
+```
+/plugin install autonoma-adhoc-planner@autonoma
+```
+
+### Usage
+
+Inside any project with Claude Code:
+
+Pass your focus description directly after the command:
+
+```
+/autonoma-adhoc-planner:generate-adhoc-tests description
+```
+
+Or invoke without arguments and the plugin will suggest focus areas based on your codebase:
+
+```
+/autonoma-adhoc-planner:generate-adhoc-tests
+```
+
+The plugin walks you through 4 steps, asking for confirmation at each checkpoint before proceeding.
+
+## How it works
+
+### How it differs from the main planner
+
+Steps 1, 2, and 4 run identically to the main planner. Step 3 is scoped:
+
+| Step | Main planner | Ad hoc planner |
+|------|-------------|----------------|
+| 1 — Knowledge Base | Full codebase | Full codebase |
+| 2 — Scenarios | Full data model | Full data model |
+| 3 — E2E Tests | All features | **Focus area only** |
+| 4 — Environment Factory | All scenarios | All scenarios |
+
+Tests are written to `autonoma/qa-tests/{focus-slug}/` so they sit alongside your existing test suite without overwriting it. Running the ad hoc planner twice with different focus areas produces two separate subfolders.
+
+### Running multiple focus areas
+
+You can run the ad hoc planner multiple times for different topics, including simultaneously. Each run writes to its own subfolder and tracks its own generation ID file.
+
+```
+autonoma/qa-tests/
+├── canvas-interactions/      ← autonoma/.generation-id-canvas-interactions
+└── signatures-and-documents/ ← autonoma/.generation-id-signatures-and-documents
+```
+
+
+---
+
 ## Scenario Recipes
 
 `autonoma/scenario-recipes.json` is the validated handoff between planning and execution. It is produced in Step 4 after the Environment Factory has been implemented or verified and after each scenario has passed lifecycle validation.
@@ -174,9 +240,10 @@ claude plugin validate ./
 ```
 autonoma-test-planner/
 ├── .claude-plugin/
-│   ├── plugin.json                     # Plugin manifest
-│   └── marketplace.json                # Marketplace catalog
+│   ├── plugin.json                     # Plugin manifest (autonoma-test-planner)
+│   └── marketplace.json                # Marketplace catalog (lists both plugins)
 ├── skills/generate-tests/SKILL.md      # /generate-tests orchestrator
+├── commands/generate-tests.md          # /generate-tests command
 ├── agents/
 │   ├── kb-generator.md                 # Step 1 subagent
 │   ├── scenario-generator.md           # Step 2 subagent
@@ -193,6 +260,22 @@ autonoma-test-planner/
 │       ├── validate_scenarios.py
 │       ├── validate_test_index.py
 │       └── validate_test_file.py
+├── adhoc/                              # autonoma-adhoc-planner plugin root
+│   ├── .claude-plugin/
+│   │   └── plugin.json                 # Plugin manifest (autonoma-adhoc-planner)
+│   ├── skills/generate-adhoc-tests/
+│   │   └── SKILL.md                    # /generate-adhoc-tests orchestrator
+│   ├── commands/
+│   │   └── generate-adhoc-tests.md     # /generate-adhoc-tests command
+│   ├── agents/
+│   │   └── focused-test-case-generator.md  # Step 3 focused subagent
+│   └── hooks/
+│       ├── hooks.json                  # PostToolUse hook config
+│       ├── validate-pipeline-output.sh # Validation dispatcher
+│       └── validators/
+│           ├── validate_test_file.py
+│           ├── validate_test_index.py
+│           └── validate_directory_structure.py
 ├── LICENSE
 └── README.md
 ```
