@@ -19,8 +19,6 @@
     {
       "name": "autonoma-test-planner-development",
       "source": "./",
-      "strict": false,
-      "commands": ["./commands"],
       "description": "[DEVELOPMENT] Generates comprehensive E2E test cases through a validated 4-step pipeline with deterministic validation"
     }
   ]
