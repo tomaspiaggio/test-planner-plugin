@@ -23,12 +23,7 @@
     },
     {
       "name": "autonoma-adhoc-planner",
-      "source": {
-        "source": "git-subdir",
-        "url": "https://github.com/Autonoma-AI/test-planner-plugin.git",
-        "path": "adhoc",
-        "ref": "chiara-ciriani/adhoc-planner-plugin"
-      },
+      "source": "./adhoc",
       "description": "Generates focused E2E tests for a user-defined topic or feature area with a custom system prompt"
     }
   ]
