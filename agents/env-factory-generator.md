@@ -173,6 +173,50 @@ password hashing, audit logs, Stripe sync, state-machine transitions — the tes
 for free. Inline ORM calls bypass all of that silently and are the #1 bug source in generated
 factories.
 
+**Rule of thumb**: in 99% of factories, a raw ORM/DB write MUST NOT appear in the factory
+body. "Raw write" means any call that inserts a row without going through the user's
+creation function. Exact patterns vary by language/ORM — a non-exhaustive list:
+
+- TypeScript/JavaScript: `prisma.<m>.create(`, `db.<m>.create(`, `tx.insert(`, `drizzle.insert(`, `knex('<t>').insert(`, `sequelize.models.<M>.create(`, `typeorm.getRepository(...).save(`, `mongoose.Model.create(`, `await <M>.create(`
+- Python: `session.add(`, `session.execute(insert(...))`, `Model.objects.create(`, `Model(...).save(`, `db.session.add(`, `conn.execute("INSERT ...")`
+- Ruby/Rails: `<Model>.create(`, `<Model>.create!(`, `<Model>.new(...).save`, `<Model>.insert(`, `ActiveRecord::Base.connection.execute("INSERT ...")`
+- PHP/Laravel: `<Model>::create(`, `new <Model>(...)->save()`, `DB::table('...')->insert(`, `$repository->persist(`
+- Java/Spring: `entityManager.persist(`, `<Repository>.save(`, `jdbcTemplate.update("INSERT ...")`
+- Go: `db.Create(`, `gorm.DB.Create(`, `sq.Insert(`, raw `db.Exec("INSERT ...")` / `db.ExecContext(...)`
+- Elixir/Ecto: `Repo.insert(`, `Repo.insert!(`, `Repo.insert_all(`
+- Rust: `diesel::insert_into(`, `sqlx::query!("INSERT ...")`, `sea_orm::ActiveModel ... .insert(`
+- Raw SQL anywhere: an `INSERT INTO <table>` string literal passed to a query/exec/prepare API
+
+If you wrote one of these inside a factory body for a model whose audit says
+`has_creation_code: true`, you took the trap. Back out and call the audited function.
+
+#### When the audit points at a route handler (no exported function exists)
+
+Sometimes `entity-audit.md` says `has_creation_code: true` but the `creation_file` is a
+route handler and the `creation_function` is an inline arrow/closure like
+`(req, res) => { db.x.create(...) }`. That means the creation logic exists but isn't
+reusable yet.
+
+**Do not copy-paste the route's body into the factory.** That's just inline ORM with extra
+steps. Instead:
+
+1. **Extract the creation logic into a named exported function** in the nearest sensible
+   module (a new `*.service.ts`, `*.repository.ts`, or a sibling `create-<model>.ts` next to
+   the route file). The function should take a plain input object (no `req`/`res`) and
+   return the created record.
+2. **Replace the route handler's body** with a call to the new exported function — the
+   behavior for real HTTP callers must stay identical. Run typecheck/tests after the
+   extraction.
+3. **Import the new function in the factory** and invoke it from `create`.
+4. **Update `autonoma/entity-audit.md`** in-place: change `creation_file` to the new file
+   and `creation_function` to the new exported name, so downstream steps (validator, future
+   regenerations) see the fixed audit.
+
+This refactor is part of the job, not an optional nice-to-have. Inlining the route body
+into a factory defeats the whole purpose. If the route body is so entangled with `req`/`res`
+that extraction is genuinely impossible, STOP and ask the user — do not paper over it with
+inline ORM.
+
 **WRONG — re-implementing creation logic inline (this is the trap):**
 
 ```ts
@@ -249,26 +293,56 @@ the sentinel.
 
 ## CRITICAL: Factory-integrity check (before writing the sentinel)
 
-Prove every factory calls the audit's identified `creation_function`. This is static
-analysis, not a vibe check:
+Prove every factory calls the audit's identified `creation_function`. This is deterministic
+static analysis, not a vibe check. Run it yourself and HALT if it fails — the next step
+(scenario-validator) runs the exact same check and will kick the work back.
 
-1. Parse `autonoma/entity-audit.md` and list every model with `has_creation_code: true`
-   with its `creation_file` and `creation_function`.
-2. For each such model, open the handler file(s) and verify BOTH:
-   - An `import` (or `require`) line pulls in `creation_function` (or the class that owns it)
-     from a path that resolves to `creation_file`.
-   - Inside that model's `defineFactory({ create })` body, the identified symbol is actually
-     invoked (e.g. `manager.getState(...)`, `createUser(...)`, `ProjectService.create(...)`).
-3. If either check fails for any model — import missing, or the factory body only touches
-   the raw ORM (`db.x.create`, `prisma.x.create`, `tx.insert(...)`) — STOP, fix it, re-run.
+### Step A — collect the audit targets
 
-A quick anti-pattern grep for Prisma projects:
+Parse `autonoma/entity-audit.md` and build a list of `(model, creation_file, creation_function)`
+for every model with `has_creation_code: true`.
+
+### Step B — grep the handler for the anti-pattern
 
 ```bash
-grep -nE '(prisma|db|tx)\.[a-zA-Z]+\.create\(' <your-handler-file> || echo "no inline ORM creates — good"
+grep -nE '(prisma|db|tx)\.[a-zA-Z_]+\.(create|createMany|insert|upsert)\(' <handler-file>
 ```
 
-Every match is a candidate for the trap.
+Every match inside a `defineFactory({ create })` body is a RED FLAG. The only legitimate
+matches are:
+- Inside a model's `teardown` body (custom cleanup is allowed).
+- Outside any `defineFactory` (auth callback, scope helpers, etc.).
+- Inside a factory for a model the audit marked `has_creation_code: false` (no service exists;
+  raw ORM is the documented fallback — though the SDK does this automatically, so you usually
+  shouldn't even write such a factory).
+
+Anything else is the trap. Do NOT ship it.
+
+### Step C — per-model structural check
+
+For each `(model, creation_file, creation_function)` from Step A, verify ALL of:
+
+1. An `import` (or `require`) line pulls `creation_function` — or the class/object that owns
+   it — into the handler file, from a path that resolves to `creation_file`.
+2. The factory body for `model` invokes that identified symbol (e.g. `manager.getState(...)`,
+   `createUser(...)`, `ProjectService.create(...)`, `service.create(...)`).
+3. The factory body does NOT contain a raw ORM write for `model` (`db.<model>.create(...)`,
+   `prisma.<model>.create(...)`, `tx.insert(<model>Table)`, etc.).
+
+If any model fails any of the three, STOP. Fix the factory per the rules in
+"The one thing you MUST NOT do" and "When the audit points at a route handler", then re-run
+this check from Step A.
+
+### Step D — commit only when clean
+
+Only write `autonoma/.endpoint-implemented` after:
+- Step B returns zero anti-pattern matches inside factory bodies.
+- Step C passes for every audited model.
+- The discover smoke test returns 200 with the expected schema shape.
+
+If you extracted any route-handler logic into a new exported function (per the earlier
+directive), the audit must have been updated in-place; re-read it after the edit before
+running Step A.
 
 ## CRITICAL: Write the implementation sentinel
 

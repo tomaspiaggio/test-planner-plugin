@@ -170,8 +170,14 @@ service, this audit can be re-run and they'll automatically get factories.
 - Read the ACTUAL code to locate creation functions — don't guess from file names alone
 - If a model has multiple creation paths (e.g., signup + admin-create), pick the canonical one
   (usually the public API or most-called path) and note the alternative in the body
-- If creation logic is only inline in route handlers (no extracted function), mark
-  `has_creation_code: false` and note this in the body. The user can choose to extract it later.
+- If creation logic is only inline in route handlers (no extracted function), still mark
+  `has_creation_code: true`, set `creation_file` to the route file and `creation_function`
+  to a descriptive name for the inline block (e.g. the handler function name, or
+  `<route>:<METHOD>`), and add `needs_extraction: true` to that model's entry. The
+  env-factory agent will extract the logic into a named exported function before wiring
+  the factory and will update this file in-place with the new path/function name.
+  The ONLY case that warrants `has_creation_code: false` is when there is genuinely no
+  create call anywhere in the codebase (or only ORM seeds in migration/fixture files).
 - Side effects are informational — they help the user understand why a factory matters, but
   they do NOT affect classification
 - Database-level triggers run on raw SQL too, so they don't affect the audit

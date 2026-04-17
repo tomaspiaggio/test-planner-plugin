@@ -60,7 +60,45 @@ Repeat until all three actions succeed for every scenario OR you exhaust 5 itera
 3. Run `discover` via curl with proper HMAC.
    - The response MUST contain `schema.models`, `schema.edges`, `schema.relations`, `schema.scopeField`.
    - **Coverage check**: every model in `entity-audit.md` MUST appear in `schema.models`. If one is missing, fix the handler's model filter / adapter config and restart the loop.
-   - **Factory coverage check**: open the handler file(s), extract the registered factory names. Every model with `has_creation_code: true` in the audit MUST be registered. Import the real creation function — NEVER re-implement inline. Restart the loop after any fix.
+   - **Factory coverage check**: open the handler file(s), extract the registered factory names. Every model with `has_creation_code: true` in the audit MUST be registered.
+   - **Factory-body integrity check (deterministic, MANDATORY)**: this is the check the env-factory agent is supposed to run before writing its sentinel. Re-run it here; do not trust the upstream. Steps:
+     1. Grep the handler file(s) for raw DB/ORM writes. The pattern set must cover every
+        language and ORM the SDK supports — any of these appearing inside a factory body for a
+        model with `has_creation_code: true` is a FAIL:
+        ```bash
+        # TypeScript/JavaScript — Prisma, Drizzle, Knex, Sequelize, TypeORM, Mongoose
+        grep -nE '(prisma|db|tx|trx)\.[a-zA-Z_]+\.(create|createMany|upsert)\(|\b(drizzle|db|tx)\.insert\(|\bknex\([^)]*\)\.insert\(|\.models\.[A-Za-z_]+\.create\(|getRepository\([^)]*\)\.save\(|\bMongoose.*\.create\(' <handler-file>
+
+        # Python — SQLAlchemy, Django ORM
+        grep -nE '\bsession\.(add|execute|bulk_insert_mappings)\(|\.objects\.create\(|\.save\(\)' <handler-file>
+
+        # Ruby/Rails — ActiveRecord
+        grep -nE '\b[A-Z][A-Za-z0-9]*\.(create|create!|insert|insert_all)\(|\.new\([^)]*\)\.save' <handler-file>
+
+        # PHP/Laravel — Eloquent, raw DB
+        grep -nE '\b[A-Z][A-Za-z0-9]*::create\(|->save\(\)|\bDB::table\([^)]*\)->insert\(' <handler-file>
+
+        # Java/Spring — JPA, JDBC
+        grep -nE '\bentityManager\.persist\(|\b[a-zA-Z]+Repository\.save\(|\bjdbcTemplate\.update\(' <handler-file>
+
+        # Go — GORM, database/sql, squirrel
+        grep -nE '\.Create\(|\bdb\.Exec(Context)?\(|\bsq\.Insert\(' <handler-file>
+
+        # Elixir/Ecto
+        grep -nE '\bRepo\.(insert|insert!|insert_all)\(' <handler-file>
+
+        # Rust — Diesel, SQLx, SeaORM
+        grep -nE '\bdiesel::insert_into\(|\bsqlx::query!?\("INSERT|ActiveModel[^{]*\.insert\(' <handler-file>
+
+        # Raw SQL INSERT in any language
+        grep -niE '"[^"]*INSERT\s+INTO\b|'"'"'[^'"'"']*INSERT\s+INTO\b' <handler-file>
+        ```
+        Use the pattern set appropriate for the project's stack (determined from the handler file
+        and `entity-audit.md`); include the raw-SQL pattern unconditionally. Any match that
+        falls inside a factory body for a `has_creation_code: true` model is a FAIL.
+     2. For each `(model, creation_file, creation_function)` from `entity-audit.md`, verify the handler contains both an `import` resolving to `creation_file` AND an invocation of `creation_function` inside that model's factory body.
+     3. If any model fails either check, this is a **handler bug** (path 3a). Fix by importing and calling the audited function. If the audit pointed at an inline route handler (no exported function), extract it into a named exported function in a nearby module, replace the route body with a call to the new function, update `entity-audit.md` in-place with the new `creation_file`/`creation_function`, then restart this step.
+     4. The validator MUST NOT write `.endpoint-validated` while any factory body contains a raw ORM create for its own model.
 
 4. For each scenario in `scenarios.md`:
    1. Build the `{action:"up", create:..., testRunId:"<scenario>-<iteration>"}` body from the scenario.
