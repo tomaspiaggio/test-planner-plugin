@@ -156,6 +156,15 @@ case "$FILE_PATH" in
     if [[ "$ack_num" =~ ^[0-9]+$ ]] && [ "$ack_num" -ge 0 ] && [ "$ack_num" -lt ${#STEP_NAMES[@]} ]; then
       emit_step_event "$ack_num" started "${STEP_NAMES[$ack_num]}"
     fi
+    # Snapshot entity-audit.md the moment the user confirms the audit is
+    # accepted (step-2-ack = "Scenarios starting", which fires AFTER the user
+    # approves the Entity Audit). This snapshot is diffed against the current
+    # audit at .endpoint-implemented time to detect the env-factory agent
+    # gaming the factory-integrity check by mass-flipping has_creation_code
+    # true -> false. See the post-mortem in the plugin repo.
+    if [ "$ack_num" = "2" ] && [ -f "autonoma/entity-audit.md" ] && [ ! -f "autonoma/.entity-audit-step2.md" ]; then
+      cp autonoma/entity-audit.md autonoma/.entity-audit-step2.md 2>/dev/null || true
+    fi
     exit 0
     ;;
 esac

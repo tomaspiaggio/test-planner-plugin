@@ -33,6 +33,24 @@ import yaml  # type: ignore
 
 SENTINEL_PATH = sys.argv[1] if len(sys.argv) > 1 else ""
 
+# Max number of models allowed to flip from has_creation_code: true to false
+# between the Step 2 snapshot and the audit at .endpoint-implemented time.
+# Overridable via env for unusual migrations; default 5 matches the agent's
+# own recommendation in the third-run post-mortem.
+AUDIT_FLIP_CAP = int(os.environ.get("AUTONOMA_AUDIT_FLIP_CAP", "5"))
+
+# Standalone server patterns: when the handler directory contains a file that
+# starts its own HTTP server instead of exporting a router mounted on the main
+# app, we block. This is the second bug from the third-run post-mortem.
+STANDALONE_SERVER_PATTERNS = [
+    re.compile(r"\bserve\s*\(\s*\{[^}]*\bfetch\b", re.DOTALL),  # @hono/node-server
+    re.compile(r"\bapp\.listen\s*\("),                              # express / hono-node
+    re.compile(r"\bhttp\.createServer\s*\("),                       # raw node
+    re.compile(r"\buvicorn\.run\s*\("),                             # python
+    re.compile(r"\bFlask\s*\([^)]*\)[^\n]*\.run\s*\("),         # flask
+    re.compile(r"\brun!\s*$", re.MULTILINE),                          # ruby sinatra-ish
+]
+
 # Anti-pattern: ORM create/insert/upsert calls that almost certainly belong to
 # a raw ORM write rather than a service/repository method call.
 ORM_ANTI_PATTERN = re.compile(
@@ -171,6 +189,187 @@ def resolve_handler_path() -> Path:
     return Path()  # unreachable
 
 
+def check_audit_flip() -> list[str]:
+    """Compare the Step 2 snapshot to the current audit; return error lines.
+
+    Enforces a cap on how many models may flip from has_creation_code: true
+    to false between Step 2 ack and .endpoint-implemented. If no snapshot
+    exists (older projects that started before this hook shipped) we skip
+    silently — the snapshot is created automatically on .step-2-ack.
+    """
+    snapshot = Path("autonoma/.entity-audit-step2.md")
+    current = Path("autonoma/entity-audit.md")
+    if not snapshot.exists() or not current.exists():
+        return []
+
+    def _true_set(path: Path) -> set[str]:
+        text = path.read_text()
+        if not text.startswith("---"):
+            return set()
+        end = text.find("\n---", 3)
+        if end < 0:
+            return set()
+        try:
+            fm = yaml.safe_load(text[3:end])
+        except yaml.YAMLError:
+            return set()
+        out: set[str] = set()
+        for entry in (fm.get("models") or []):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name") or entry.get("model")
+            if name and bool(entry.get("has_creation_code")):
+                out.add(str(name))
+        return out
+
+    before = _true_set(snapshot)
+    after = _true_set(current)
+    flipped = sorted(before - after)
+    if len(flipped) <= AUDIT_FLIP_CAP:
+        return []
+
+    lines = [
+        f"AUDIT FLIP CAP EXCEEDED — {len(flipped)} models flipped from "
+        f"has_creation_code: true to false since Step 2 (cap: {AUDIT_FLIP_CAP}).",
+        "",
+        "The env-factory agent is editing ground truth to dodge the factory "
+        "integrity check. Branch 3 (\"audit is factually wrong\") is for cases "
+        "where the audit's creation_function does NOT exist or creates NOTHING "
+        "— not for cases where calling it is inconvenient (complex DI, external "
+        "side effects, Temporal workflows, bulk orchestrators). Those are "
+        "Branch 2 problems: extract helpers, wire constructor deps, or guard "
+        "external calls in the service itself.",
+        "",
+        "Models flipped (showing first 40):",
+    ]
+    for name in flipped[:40]:
+        lines.append(f"  - {name}")
+    if len(flipped) > 40:
+        lines.append(f"  ... and {len(flipped) - 40} more")
+    lines.append("")
+    lines.append(
+        "To proceed: (a) restore has_creation_code: true for the models above "
+        "and write real factories per the Per-model decision tree, or (b) if "
+        "you truly believe a subset should flip, ask the user to raise "
+        "AUTONOMA_AUDIT_FLIP_CAP and confirm the diff."
+    )
+    return lines
+
+
+def check_handler_mount(handler_path: Path) -> list[str]:
+    """Return error lines if the handler isn't mounted on the main app.
+
+    Two checks:
+      1. No sibling file in the handler directory starts its own server.
+      2. Somewhere in the backend source tree, a file imports the handler
+         (by relative path, module path, or file basename).
+    """
+    handler_dir = handler_path.parent
+    errors: list[str] = []
+
+    # 1) Detect standalone server files in the handler directory.
+    standalone_hits: list[tuple[Path, str]] = []
+    for sibling in handler_dir.iterdir():
+        if not sibling.is_file():
+            continue
+        if sibling == handler_path:
+            continue
+        if sibling.name.endswith((".test.ts", ".test.js", ".spec.ts", ".spec.js")):
+            continue
+        if sibling.suffix not in {".ts", ".tsx", ".js", ".mjs", ".py", ".rb", ".go", ".rs", ".java"}:
+            continue
+        try:
+            text = sibling.read_text()
+        except OSError:
+            continue
+        for pat in STANDALONE_SERVER_PATTERNS:
+            if pat.search(text):
+                standalone_hits.append((sibling, pat.pattern))
+                break
+
+    if standalone_hits:
+        errors.append(
+            "STANDALONE SERVER DETECTED — the Autonoma handler must be mounted "
+            "as a route on the existing application, not run as its own HTTP "
+            "server. The following files bind their own port:"
+        )
+        errors.append("")
+        for p, pat in standalone_hits:
+            errors.append(f"  - {p} (matched: {pat})")
+        errors.append("")
+        errors.append(
+            "Fix: delete the standalone server file and mount the handler as a "
+            "route on the main app, following the same pattern every other "
+            "feature uses (e.g. `app.route(\"/api/autonoma\", router)` in Hono, "
+            "`app.use(\"/api/autonoma\", router)` in Express, or the equivalent "
+            "for your framework). Read the main app entry file first and copy "
+            "its existing routing pattern."
+        )
+        errors.append("")
+
+    # 2) Verify the handler is imported from somewhere reachable. We use the
+    # last two path segments (parent-dir/file-stem) to avoid false positives
+    # from unrelated packages that happen to share the parent-dir name (e.g.
+    # `@autonoma/logger` vs the local `autonoma/handler`).
+    handler_basename = handler_path.stem              # e.g. "handler"
+    handler_parent_dir = handler_dir.name             # e.g. "autonoma"
+    specific_fragment = f"{handler_parent_dir}/{handler_basename}"  # "autonoma/handler"
+    # Also accept any file in the same parent directory (routes on the router
+    # file next to handler.ts still count as mounting — e.g. autonoma/router.ts
+    # is imported by app.ts and imports handler.ts).
+    import_patterns = [
+        re.compile(rf"['\"][^'\"]*{re.escape(specific_fragment)}(?:['\"]|\.[a-z]+['\"])"),
+        re.compile(rf"\bfrom\s+[\w.]*{re.escape(handler_parent_dir)}\.{re.escape(handler_basename)}\b"),  # python
+    ]
+    found_import = False
+    root = Path.cwd()
+    # Only scan source dirs with reasonable extensions.
+    source_exts = {".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".rb", ".go", ".rs", ".java", ".ex", ".exs", ".php"}
+    skip_dirs = {"node_modules", ".git", "dist", "build", ".next", ".turbo", "target", "vendor", "__pycache__", "autonoma"}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.startswith(".")]
+        for fn in filenames:
+            if not any(fn.endswith(ext) for ext in source_exts):
+                continue
+            fp = Path(dirpath) / fn
+            if fp.resolve() == handler_path.resolve():
+                continue
+            if fp.parent.resolve() == handler_path.parent.resolve():
+                # Don't count imports inside the handler's own directory — the
+                # standalone server.ts imports handler.ts but that isn't
+                # "reachable from the main app".
+                continue
+            try:
+                text = fp.read_text()
+            except OSError:
+                continue
+            for pat in import_patterns:
+                if pat.search(text):
+                    found_import = True
+                    break
+            if found_import:
+                break
+        if found_import:
+            break
+
+    if not found_import:
+        errors.append(
+            f"HANDLER NOT MOUNTED — no file outside {handler_dir} imports the "
+            f"Autonoma handler. The endpoint is unreachable from the main "
+            f"application's routes."
+        )
+        errors.append("")
+        errors.append(
+            "Fix: import the handler (or its router) from the main app's entry "
+            "file (e.g. apps/api/src/app.ts) and mount it on a route. The "
+            "Autonoma platform sends HMAC-signed requests to the main API's "
+            "public URL — a handler that nothing imports is dead code."
+        )
+        errors.append("")
+
+    return errors
+
+
 def main() -> None:
     audit = parse_audit()
     handler_path = resolve_handler_path()
@@ -202,7 +401,10 @@ def main() -> None:
         name for name, has_code in audit.items() if has_code and name not in seen_models
     ]
 
-    if not violations and not missing_factories:
+    audit_flip_errors = check_audit_flip()
+    mount_errors = check_handler_mount(handler_path)
+
+    if not violations and not missing_factories and not audit_flip_errors and not mount_errors:
         sys.exit(0)
 
     lines = [
@@ -231,12 +433,17 @@ def main() -> None:
         for name in missing_factories:
             lines.append(f"  - {name}")
         lines.append("")
-    lines.append(
-        "To fix: re-run the Per-model decision tree for every failing model. If the "
-        "creation function is inline in a route/framework hook, extract it into a "
-        "named exported function, update entity-audit.md in place (clear "
-        "needs_extraction), then call the new function from the factory."
-    )
+    if audit_flip_errors:
+        lines.extend(audit_flip_errors)
+    if mount_errors:
+        lines.extend(mount_errors)
+    if violations or missing_factories:
+        lines.append(
+            "To fix: re-run the Per-model decision tree for every failing model. If the "
+            "creation function is inline in a route/framework hook, extract it into a "
+            "named exported function, update entity-audit.md in place (clear "
+            "needs_extraction), then call the new function from the factory."
+        )
     fail("\n".join(lines))
 
 
