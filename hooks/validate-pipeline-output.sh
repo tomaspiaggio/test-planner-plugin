@@ -136,10 +136,28 @@ case "$FILE_PATH" in
     # in the sentinel body, and blocks the write when any factory for a
     # has_creation_code: true model contains an inline ORM write.
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    # Gate 1 — cheap syntactic checks (grep, mount, audit-flip cap).
     if ! OUTPUT=$(python3 "$SCRIPT_DIR/validators/validate_endpoint_implemented.py" "$FILE_PATH" 2>&1); then
       printf '%s\n' "$OUTPUT" >&2
       exit 2
     fi
+    # Gate 2 — creation_file immutability (catches the audit-rewrite attack
+    # without needing an LLM call). Cheap, fast, deterministic.
+    if ! OUTPUT=$(python3 "$SCRIPT_DIR/validators/validate_creation_file_immutable.py" 2>&1); then
+      printf '%s\n' "$OUTPUT" >&2
+      exit 2
+    fi
+    # Gate 3 — semantic per-model fidelity via claude -p fan-out. Reads the
+    # rubric from the docs URL at runtime (updatable without plugin changes).
+    # Blocks on hard failures; transient errors + missing config are
+    # warning-only so a broken docs endpoint does not freeze the pipeline.
+    if ! OUTPUT=$(python3 "$SCRIPT_DIR/validators/validate_factory_fidelity.py" "$FILE_PATH" 2>&1); then
+      printf '%s\n' "$OUTPUT" >&2
+      exit 2
+    fi
+    # Gate 3 prints progress to stderr even on success; surface it so the
+    # user sees the validator actually ran.
+    printf '%s\n' "$OUTPUT" >&2
     emit_step_event 3 completed "Implement"
     exit 0
     ;;
