@@ -202,6 +202,12 @@ There is no named export to import.
      Organization, Member, BillingCustomer; NextAuth's callback writing Account rows).
 3. Replace the inline block with a call to the new function. The real HTTP caller's
    behavior MUST stay identical. Run the project's typecheck/test command before moving on.
+   **Leave a short comment** (1–2 lines) above the new exported function explaining why it
+   was extracted — e.g. `// Extracted from the Better Auth databaseHooks.user.create closure
+   so the Autonoma Environment Factory can reuse the same creation path (Org + Member +
+   billing provisioning) as production. See autonoma/entity-audit.md.` This is a courtesy
+   to the developers who will encounter the new function — they should be able to tell at a
+   glance that it was lifted out for factory reuse, not invented for it.
 4. **Update `autonoma/entity-audit.md` in-place** — change `creation_file` to the new file,
    `creation_function` to the new exported name, and REMOVE `needs_extraction: true`.
    Downstream steps read the audit; they must see the fixed state.
