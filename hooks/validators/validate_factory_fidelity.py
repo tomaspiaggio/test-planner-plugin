@@ -153,36 +153,145 @@ def find_factory_block(handler_src: str, model: str) -> str:
     return ""
 
 
-def find_helper(handler_src: str, handler_path: Path, model: str, factory_block: str) -> Optional[tuple[Path, str, str]]:
-    """Return (helper_path, helper_function_name, helper_source_snippet) if the
-    factory calls a named helper imported into the handler."""
-    body = factory_block
-    # Look for return <name>( or await <name>( patterns
-    call = re.search(r"\b(?:return|await)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", body)
-    if not call:
-        return None
-    fn_name = call.group(1)
-    # Find the import for that name in the handler file
-    imp = re.search(
-        rf"import\s+(?:type\s+)?\{{[^}}]*\b{re.escape(fn_name)}\b[^}}]*\}}\s+from\s+['\"]([^'\"]+)['\"]",
-        handler_src,
-    )
-    if not imp:
-        return None
-    rel = imp.group(1)
-    base = handler_path.parent
-    for ext in (".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.js", ""):
-        p = (base / f"{rel}{ext}").resolve()
-        if p.is_file():
-            try:
-                text = p.read_text()
-            except OSError:
+def _load_tsconfig_paths(cwd: Path) -> list[tuple[str, list[str]]]:
+    """Best-effort parse of tsconfig.json compilerOptions.paths for alias
+    resolution. Walks up a few ancestors so apps/api/ monorepos pick up the
+    root tsconfig. Silently returns [] on any parse error."""
+    roots: list[Path] = [cwd]
+    cur = cwd
+    for _ in range(4):
+        cur = cur.parent
+        roots.append(cur)
+    seen: set[Path] = set()
+    out: list[tuple[str, list[str]]] = []
+    for root in roots:
+        for name in ("tsconfig.json", "tsconfig.base.json"):
+            p = root / name
+            if p in seen or not p.is_file():
                 continue
-            snippet = extract_fn_snippet(text, fn_name)
-            if snippet:
-                return p, fn_name, snippet
-            return p, fn_name, text[:4000]
+            seen.add(p)
+            try:
+                raw = p.read_text()
+                raw = re.sub(r"//[^\n]*", "", raw)
+                raw = re.sub(r",\s*([}\]])", r"\1", raw)
+                data = json.loads(raw)
+            except Exception:
+                continue
+            co = (data.get("compilerOptions") or {})
+            base_url = co.get("baseUrl") or "."
+            base_dir = (p.parent / base_url).resolve()
+            for prefix, resolutions in (co.get("paths") or {}).items():
+                if not isinstance(resolutions, list):
+                    continue
+                resolved = [str((base_dir / r).resolve()) for r in resolutions if isinstance(r, str)]
+                out.append((prefix, resolved))
+    return out
+
+
+def _resolve_import_path(rel: str, handler_path: Path, alias_map: list[tuple[str, list[str]]]) -> Optional[Path]:
+    """Resolve an import specifier to a filesystem path. Handles relative
+    imports and TS path aliases with trailing /*."""
+    candidates: list[Path] = []
+    if rel.startswith("."):
+        candidates.append((handler_path.parent / rel).resolve())
+    elif rel.startswith("/"):
+        candidates.append(Path(rel))
+    else:
+        for prefix, resolutions in alias_map:
+            pref = prefix.rstrip("*").rstrip("/")
+            if rel == pref or rel.startswith(pref + "/"):
+                tail = rel[len(pref):].lstrip("/")
+                for r in resolutions:
+                    root = r.rstrip("*").rstrip("/")
+                    candidates.append(Path(root) / tail if tail else Path(root))
+    for c in candidates:
+        for ext in (".ts", ".tsx", ".js", ".mjs", ""):
+            p = Path(str(c) + ext)
+            if p.is_file():
+                return p
+        for idx in ("index.ts", "index.tsx", "index.js"):
+            p = c / idx
+            if p.is_file():
+                return p
     return None
+
+
+_IDENT_BLOCKLIST = {
+    "if", "for", "while", "switch", "return", "await", "async", "new",
+    "Date", "String", "Number", "Boolean", "Object", "Array", "Error",
+    "Promise", "Map", "Set", "JSON", "Math", "console", "typeof", "function",
+    "require", "import", "catch", "throw", "void", "delete", "instanceof",
+}
+
+
+def find_helpers(handler_src: str, handler_path: Path, factory_block: str) -> list[tuple[Path, str, str]]:
+    """Return every (helper_path, helper_fn_name, helper_source) the factory
+    block invokes via a named import in the handler. Strips string/template
+    literals first so identifiers inside quotes don't produce false calls."""
+    if not factory_block:
+        return []
+    stripped = re.sub(r"'[^'\n]*'|\"[^\"\n]*\"|`[^`]*`", "''", factory_block)
+    candidates = set(re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", stripped)) - _IDENT_BLOCKLIST
+    alias_map = _load_tsconfig_paths(Path.cwd())
+    imports: dict[str, str] = {}
+    for m in re.finditer(
+        r"import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+['\"]([^'\"]+)['\"]",
+        handler_src,
+    ):
+        spec = m.group(2)
+        for name in m.group(1).split(","):
+            name = name.strip()
+            if " as " in name:
+                name = name.split(" as ", 1)[1].strip()
+            if name:
+                imports[name] = spec
+    out: list[tuple[Path, str, str]] = []
+    seen: set[Path] = set()
+    for name in sorted(candidates):
+        spec = imports.get(name)
+        if not spec:
+            continue
+        resolved = _resolve_import_path(spec, handler_path, alias_map)
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            text = resolved.read_text()
+        except OSError:
+            continue
+        snippet = extract_fn_snippet(text, name) or text[:4000]
+        out.append((resolved, name, snippet))
+    return out
+
+
+def find_helper(handler_src: str, handler_path: Path, model: str, factory_block: str) -> Optional[tuple[Path, str, str]]:
+    """Legacy single-helper accessor kept for backwards compat."""
+    helpers = find_helpers(handler_src, handler_path, factory_block)
+    return helpers[0] if helpers else None
+
+
+def _unresolved_calls(handler_src: str, factory_block: str, resolved: list[tuple[Path, str, str]]) -> list[str]:
+    """Identifiers called in the factory block that weren't in resolved + not in the blocklist."""
+    if not factory_block:
+        return []
+    stripped = re.sub(r"'[^'\n]*'|\"[^\"\n]*\"|`[^`]*`", "''", factory_block)
+    calls = set(re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", stripped)) - _IDENT_BLOCKLIST
+    resolved_names = {name for _, name, _ in resolved}
+    # Also strip anything that looks like a member access call (obj.method() captured as "method")
+    # by requiring the name to appear as a named import too.
+    imported = set(re.findall(
+        r"import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+['\"][^'\"]+['\"]",
+        handler_src,
+    ))
+    imported_names: set[str] = set()
+    for group in imported:
+        for n in group.split(","):
+            n = n.strip()
+            if " as " in n:
+                n = n.split(" as ", 1)[1].strip()
+            if n:
+                imported_names.add(n)
+    return sorted((calls & imported_names) - resolved_names)
 
 
 def extract_fn_snippet(src: str, fn_name: str) -> str:
@@ -251,15 +360,33 @@ def fill_template(
     cur_entry: Optional[dict],
     handler_path: Path,
     factory_block: str,
-    helper: Optional[tuple[Path, str, str]],
+    helpers: list[tuple[Path, str, str]],
+    unresolved_calls: list[str],
     orig_path: str,
     orig_snippet: str,
 ) -> str:
-    helper_section = (
-        f"File: {helper[0]}\nFunction: {helper[1]}\n\n```\n{helper[2]}\n```"
-        if helper
-        else "(The factory does not call an external helper.)"
-    )
+    if helpers:
+        blocks = []
+        for p, name, body in helpers:
+            blocks.append(f"File: {p}\nFunction: {name}\n\n```\n{body}\n```")
+        helper_section = "\n\n".join(blocks)
+        if unresolved_calls:
+            helper_section += (
+                "\n\n(Additional identifiers called by the factory were not resolvable "
+                f"as imports and may or may not be helpers: {', '.join(unresolved_calls)})"
+            )
+    elif unresolved_calls:
+        helper_section = (
+            "(The factory calls identifiers that were not resolvable as named imports: "
+            f"{', '.join(unresolved_calls)}. Treat this as missing-context, not as evidence "
+            "of a raw-write factory.)"
+        )
+    else:
+        helper_section = "(The factory does not call an external helper.)"
+
+    needs_extraction = "true" if snap_entry.get("needs_extraction") else "false"
+    extracted_to = str(snap_entry.get("extracted_to") or "").strip() or "(not set)"
+
     return (
         tpl.replace("{{RUBRIC}}", rubric)
         .replace("{{MODEL}}", model)
@@ -271,6 +398,8 @@ def fill_template(
         .replace("{{HANDLER_PATH}}", str(handler_path))
         .replace("{{FACTORY_BLOCK}}", factory_block or "(factory registration not found)")
         .replace("{{HELPER_SECTION}}", helper_section)
+        .replace("{{NEEDS_EXTRACTION}}", needs_extraction)
+        .replace("{{EXTRACTED_TO}}", extracted_to)
         .replace("{{ORIGINAL_CREATION_FILE}}", orig_path or "(unknown)")
         .replace("{{ORIGINAL_CREATION_SNIPPET}}", orig_snippet)
     )
@@ -381,11 +510,12 @@ def main() -> None:
         snap_entry = snap[model]
         cur_entry = cur.get(model)
         factory_block = find_factory_block(handler_src, model)
-        helper = find_helper(handler_src, handler_path, model, factory_block) if factory_block else None
+        helpers = find_helpers(handler_src, handler_path, factory_block) if factory_block else []
+        unresolved = _unresolved_calls(handler_src, factory_block, helpers) if factory_block else []
         orig_path, orig_snippet = load_original_snippet(snap_entry)
         prompt = fill_template(
             tpl, rubric, model, snap_entry, cur_entry, handler_path,
-            factory_block, helper, orig_path, orig_snippet,
+            factory_block, helpers, unresolved, orig_path, orig_snippet,
         )
         tasks.append({"model": model, "prompt": prompt})
 

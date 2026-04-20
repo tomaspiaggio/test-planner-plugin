@@ -5,9 +5,11 @@ validator's schema invariants.
 Each fixture is a self-contained JSON blob. The kind of fixture is chosen by
 `expected_verdict` (or by the `kind` field for non-LLM fixtures):
 
-- `expected_verdict: "pass" | "fail"` — LLM fixture. Feeds the prompt to
-  `claude -p`, parses the JSON verdict, and asserts verdict + failing
-  criteria match.
+- `expected_verdict: "pass" | "fail" | "error"` — LLM fixture. Feeds the
+  prompt to `claude -p`, parses the JSON verdict, and asserts verdict +
+  failing criteria match. `error` is used when a fixture deliberately
+  withholds context (e.g. helper unresolvable) and the LLM should decline
+  to fail-judge rather than falsely fail.
 - `expected_verdict: "skip"` — filter fixture. Asserts that the fidelity
   validator's model selector would NOT include this model (i.e. the audit
   entry is pure dependent / legacy false). No LLM call, no cost.
@@ -127,7 +129,7 @@ def main() -> int:
 
     # Only fetch rubric if we have any LLM fixtures left in the run list
     needs_llm = any(
-        load_fixture(fp).get("expected_verdict") in ("pass", "fail")
+        load_fixture(fp).get("expected_verdict") in ("pass", "fail", "error")
         for fp in fixtures
     )
     rubric = tpl = None
