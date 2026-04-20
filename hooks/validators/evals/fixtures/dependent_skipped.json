@@ -1,0 +1,7 @@
+{
+  "kind": "audit_filter",
+  "note": "Pure dependent (independently_created:false) must be silently skipped by the fidelity validator — no factory, no claude -p call. This fixture is evaluated by checking validate_factory_fidelity's model list, not by calling the LLM.",
+  "model": "BranchDeployment",
+  "expected_verdict": "skip",
+  "step2_audit_entry": "- name: BranchDeployment\n  independently_created: false\n  created_by:\n    - owner: Application\n      via: ApplicationsService.createApplication\n      why: \"Minted inside the Application transaction so the default branch has a deployment row wired up from the start.\"\n"
+}

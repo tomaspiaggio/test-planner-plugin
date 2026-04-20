@@ -1,0 +1,7 @@
+{
+  "kind": "audit_validator",
+  "note": "Dependent whose created_by owner doesn't exist in the audit. The audit VALIDATOR (not the fidelity validator) must reject. This fixture is asserted via subprocess against validate_entity_audit.py.",
+  "audit_frontmatter": "model_count: 2\nfactory_count: 1\nmodels:\n  - name: User\n    independently_created: true\n    creation_file: src/users/user.service.ts\n    creation_function: UserService.create\n    side_effects: []\n    created_by: []\n  - name: Branch\n    independently_created: false\n    created_by:\n      - owner: Application\n        via: ApplicationsService.createApplication\n        why: \"Minted inline — but Application is not in this audit.\"\n",
+  "expected_exit": 1,
+  "expected_stderr_substring": "owner='Application' does not match any model"
+}

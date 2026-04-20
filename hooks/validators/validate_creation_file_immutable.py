@@ -23,6 +23,11 @@ from pathlib import Path
 
 import yaml  # type: ignore
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _audit_schema import is_independently_created  # noqa: E402
+
 
 def load_audit(path: Path) -> dict[str, dict]:
     if not path.exists():
@@ -58,12 +63,12 @@ def main() -> None:
 
     violations: list[tuple[str, str, str]] = []
     for name, snap_entry in snap.items():
-        if not snap_entry.get("has_creation_code"):
+        if not is_independently_created(snap_entry):
             continue
         cur_entry = cur.get(name)
         if cur_entry is None:
             continue
-        if not cur_entry.get("has_creation_code"):
+        if not is_independently_created(cur_entry):
             # Flipped to false — caught elsewhere.
             continue
         snap_file = (snap_entry.get("creation_file") or "").strip()

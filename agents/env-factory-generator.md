@@ -36,7 +36,7 @@ You may be connected to a production database. Follow these rules absolutely:
 ## The #1 rule — read before writing a single factory
 
 **`db.<model>.create()` (or any equivalent ORM/SQL write) inside a factory body for a model
-whose audit says `has_creation_code: true` is NEVER acceptable.** There is no condition
+whose audit says `independently_created: true` is NEVER acceptable.** There is no condition
 under which this is the right output. If calling the audited function feels hard (inline in
 a route, buried in a framework hook, needs DI, triggers Temporal), the answer is never
 "just use the ORM." The answer is one of: extract, wire DI, use the app's test-mode
@@ -77,8 +77,8 @@ business logic the user will add next month. It produces data that looks right i
    These are the source of truth. Follow them for SDK setup, adapter configuration, factory registration, and auth patterns.
 
 3. Read `autonoma/entity-audit.md` — parse the frontmatter. For every model with
-   `has_creation_code: true`, you MUST register a factory that calls the identified
-   `creation_function` in `creation_file`. Models with `has_creation_code: false` get no
+   `independently_created: true`, you MUST register a factory that calls the identified
+   `creation_function` in `creation_file`. Models with `independently_created: false` get no
    factory — the SDK will fall back to raw SQL INSERT automatically.
 
 4. Read `autonoma/scenarios.md` — parse the frontmatter and full scenario data. Identify every
@@ -100,15 +100,58 @@ business logic the user will add next month. It produces data that looks right i
 
 ## Factory registration philosophy
 
-Register a factory for **every model with `has_creation_code: true`** — no exceptions.
+Register a factory for **every model with `independently_created: true`** — no exceptions.
 
 This is true even if the creation function looks trivial. A factory wired up to `ProjectService.create()`
 that today just calls `prisma.project.create()` will automatically benefit from any business logic
 the user adds later (audit log, Stripe sync, cache write). Raw SQL, by contrast, can never run
 that logic — it's always a compatibility risk.
 
-Models with `has_creation_code: false` fall back to the SDK's raw SQL path. That's safe because
+Models with `independently_created: false` fall back to the SDK's raw SQL path. That's safe because
 the audit explicitly determined there's no creation logic to preserve.
+
+## Dependents, cascades, and teardown
+
+For every root (`independently_created: true`) decide how its dependents will be torn down
+before writing the factory. The `created_by` list in the audit tells you which models come
+into existence as a byproduct of this root's creation flow — those rows must also be deleted
+when the SDK tears down the root.
+
+Walk this decision tree in order. The first match wins; if none match, STOP and report.
+
+1. **Schema cascade** — check the ORM schema. If the FK chain from every dependent back to
+   the root is `onDelete: Cascade` (Prisma) / `ON DELETE CASCADE` (raw SQL) / analogous in
+   your ORM, you're done. The SDK deletes the root row and the DB cleans up the rest. No
+   `teardown` field needed on the factory.
+2. **Existing delete function** — if the codebase has a delete method that already tears
+   down the same subtree (e.g. a `<Root>Service.delete<Root>` that removes the root AND
+   every dependent it minted), register `teardown` on the factory to call that function.
+   Same principle as the `create` side: stay on the user's code path.
+3. **Return dependents' IDs the production function ALREADY returns** — if the production
+   `create` function returns the dependent IDs in its result (e.g. returns
+   `{ root, child, grandchild }`), forward those IDs in your factory's return so they land
+   in refs, then register a `teardown` that deletes them in reverse FK order.
+4. **None of the above — STOP.** Do NOT modify the production service to return more IDs
+   than it already does just to make teardown work. Doing so changes the real code path to
+   serve test needs, which is exactly the inversion we avoid. Report the gap to the user
+   and let them choose: add a cascade, add a delete function, or accept orphans until
+   `TRUNCATE` between test runs.
+
+The `created_by[].why` field is a useful hint for this: if it says "minted inline in the
+same transaction", option 1 (schema cascade) is usually set up correctly; if it says "seeded
+with the owner so onboarding has something to advance through", check whether the dependent
+is behind a soft-delete flag the root's delete function already handles.
+
+Pure dependents (`independently_created: false`) never have their own `teardown` — they are
+torn down via their owner's factory (one of the four options above).
+
+## Compatibility with legacy audits
+
+Older audits used a single `has_creation_code` field. The validators read both schemas and
+treat `has_creation_code: true` as `independently_created: true` with an empty `created_by`.
+If the audit you're reading only has `has_creation_code`, you can still register factories,
+but you'll lose the `created_by` teardown guidance above — prefer regenerating the audit
+with the current prompt when possible.
 
 ## Research pass — MANDATORY before writing any factory
 
@@ -116,7 +159,7 @@ Post-mortems of past runs show a consistent failure mode: the agent makes **one 
 decision and applies it 50 times**. The research pass prevents this by forcing you to
 open every relevant file and document a per-model decision *before* touching the handler.
 
-Write a table to `autonoma/.factory-plan.md` with one row per `has_creation_code: true`
+Write a table to `autonoma/.factory-plan.md` with one row per `independently_created: true`
 model in the audit. Fill EVERY cell — do not leave any as TODO. The orchestrator and
 the user will review this table before you write a single factory.
 
@@ -179,7 +222,7 @@ you call the real function. Inlining `db.user.create()` silently drops them.
 
 ## Per-model decision tree (run this BEFORE writing any factory)
 
-For every model with `has_creation_code: true` in `autonoma/entity-audit.md`, walk this tree
+For every model with `independently_created: true` in `autonoma/entity-audit.md`, walk this tree
 in order. Do NOT skip. Each branch has exactly one legitimate output — there is no "give up
 and use `db.<model>.create()`" escape hatch.
 
@@ -230,7 +273,7 @@ Right: extract the closure body into `export async function createUserWithOnboar
 in `src/auth/create-user.ts`, call it from the Better Auth hook (so production still works),
 update the audit, then `import { createUserWithOnboarding }` in the factory.
 
-### Branch 2 — `has_creation_code: true`, no `needs_extraction`
+### Branch 2 — `independently_created: true`, no `needs_extraction`
 
 Meaning: a named exported function or class method already exists. Import it and call it.
 Do not copy its body. Do not call the ORM directly "because it's simpler." The whole point
@@ -238,7 +281,7 @@ is to stay on the user's code path.
 
 Go to the DI playbook below to figure out how to invoke it.
 
-### Branch 3 — `has_creation_code: false`
+### Branch 3 — `independently_created: false`
 
 Do not register a factory at all. The SDK's raw SQL fallback handles it. Writing a factory
 here just so you can call `db.<model>.create()` is the anti-pattern in disguise — let the
@@ -408,7 +451,7 @@ these new exports by name.
 
 Write a single handler file that:
 1. Imports and configures the ORM adapter with the scope field
-2. Registers factories for EVERY model with `has_creation_code: true` in entity-audit.md
+2. Registers factories for EVERY model with `independently_created: true` in entity-audit.md
 3. Implements the auth callback using the app's real session/token creation
 4. Passes both secrets from environment variables
 
@@ -416,7 +459,7 @@ Match existing codebase patterns — import style, file organization, error hand
 
 ### 4. Register factories (one per model with creation code)
 
-For every entry in entity-audit.md with `has_creation_code: true`:
+For every entry in entity-audit.md with `independently_created: true`:
 
 - Import the function from `creation_file` (post-extraction if Branch 1 applied)
 - Wrap it in `defineFactory({ create, teardown? })` from `@autonoma-ai/sdk`
@@ -432,7 +475,7 @@ password hashing, audit logs, Stripe sync, state-machine transitions — the tes
 for free. Inline ORM calls bypass all of that silently and are the #1 bug source in generated
 factories.
 
-**A raw ORM/DB write MUST NEVER appear in a factory body for a `has_creation_code: true`
+**A raw ORM/DB write MUST NEVER appear in a factory body for a `independently_created: true`
 model.** There are no exceptions. Exact patterns vary by language/ORM — a non-exhaustive list:
 
 - TypeScript/JavaScript: `prisma.<m>.create(`, `db.<m>.create(`, `tx.insert(`, `drizzle.insert(`, `knex('<t>').insert(`, `sequelize.models.<M>.create(`, `typeorm.getRepository(...).save(`, `mongoose.Model.create(`, `await <M>.create(`, `.upsert(`
@@ -446,7 +489,7 @@ model.** There are no exceptions. Exact patterns vary by language/ORM — a non-
 - Raw SQL anywhere: an `INSERT INTO <table>` string literal passed to a query/exec/prepare API
 
 If you wrote one of these inside a factory body for a model whose audit says
-`has_creation_code: true`, you took the trap. Delete it. Go back to the per-model decision
+`independently_created: true`, you took the trap. Delete it. Go back to the per-model decision
 tree and the DI playbook.
 
 **WRONG — re-implementing creation logic inline (this is the trap):**
@@ -514,7 +557,7 @@ static analysis, not a vibe check. Run it yourself and HALT if it fails — the 
 ### Step A — collect the audit targets
 
 Parse `autonoma/entity-audit.md` and build a list of `(model, creation_file, creation_function)`
-for every model with `has_creation_code: true`. Also flag any entry that still has
+for every model with `independently_created: true`. Also flag any entry that still has
 `needs_extraction: true` — that's a bug (you were supposed to extract first and clear the
 flag). HALT and go do the extraction.
 
@@ -528,7 +571,7 @@ Every match inside a `defineFactory({ create })` body is a RED FLAG. The only le
 matches are:
 - Inside a model's `teardown` body (custom cleanup is allowed).
 - Outside any `defineFactory` (auth callback, scope helpers, etc.).
-- Inside a factory for a model the audit marked `has_creation_code: false` (no service exists;
+- Inside a factory for a model the audit marked `independently_created: false` (no service exists;
   raw ORM is the documented fallback — though the SDK does this automatically, so you usually
   shouldn't even write such a factory).
 
@@ -603,10 +646,10 @@ After implementation and validation, explain:
 - Always implement in the project's existing backend — don't create a standalone server
 - Match existing code patterns and conventions
 - Use the same ORM/database layer the project already uses
-- Register factories for EVERY model with `has_creation_code: true` in the audit — no exceptions, even for thin wrappers
+- Register factories for EVERY model with `independently_created: true` in the audit — no exceptions, even for thin wrappers
 - Resolve every `needs_extraction: true` by extracting FIRST, then wiring the factory
 - Never reimplement the user's creation logic in a factory — always call their function
-- `db.<model>.create()` in a factory for a `has_creation_code: true` model is NEVER acceptable
+- `db.<model>.create()` in a factory for a `independently_created: true` model is NEVER acceptable
 - ALL database writes go through the SDK endpoint — never write directly
 - Use `testRunId` to make unique fields (emails, org names) to prevent parallel test collisions
 - Validate the FULL lifecycle (discover → up → verify → down → verify) before completing

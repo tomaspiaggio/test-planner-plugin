@@ -115,7 +115,34 @@ and `autonoma/skills/`. Your output MUST be written to `autonoma/scenarios.md` w
     parent using the relation field names from the audit. Use `_ref` only for cross-branch
     references that cannot be expressed through nesting.
 
-11. Write the output to `autonoma/scenarios.md`.
+11. **Standalone vs via-owner choice.** For every model that appears in a scenario, consult
+    the audit and pick one of two paths:
+
+    - If the model has `independently_created: true` and the scenario narrative wants it
+      in isolation (e.g. the user creates a child directly, independent of any root), add
+      it as a top-level tree node. The SDK will call its factory directly.
+    - If the model appears in some owner's `created_by` list and the scenario narrative
+      already includes that owner (e.g. the scenario already has the root, and a default
+      child / onboarding row / deployment row comes along for free), **do NOT add the
+      model as a separate node**. It is created as a side effect of the owner's factory.
+      Quote the `why` from the audit in the scenario prose so the reader knows where it
+      came from.
+
+    **Dual models** (`independently_created: true` AND listed in someone's `created_by`)
+    get to pick per-scenario:
+
+    - Narrative where the root is being created for the first time → the child comes in
+      via the owner (via-owner path).
+    - Narrative where the root already exists and the user is creating a standalone child
+      → the child is a top-level node (standalone-factory path); its owner is also in
+      the tree, as its FK parent.
+
+    Never double-create a dependent. If the audit says an owner mints a dependent row
+    inline, and your scenario has that owner, the dependent must not appear as a separate
+    tree node — the factory already creates it, and adding it twice will either fail
+    uniqueness checks or produce confusing test state.
+
+12. Write the output to `autonoma/scenarios.md`.
 
 ## CRITICAL: Output Format
 

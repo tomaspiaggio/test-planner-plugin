@@ -11,7 +11,7 @@ How it works:
   1. Fetch the factory-fidelity rubric + prompt template from
      $(cat autonoma/.docs-url)/llms/test-planner/factory-fidelity-rubric.txt
   2. Load the Step 2 audit snapshot (ground truth) and the current audit.
-  3. For every model with has_creation_code: true in the snapshot, build a
+  3. For every model with independently_created: true in the snapshot, build a
      prompt with: Step 2 entry, current entry, factory block, helper (if
      imported), original creation_function snippet.
   4. Run `claude -p --output-format json "<prompt>"` in parallel (bounded
@@ -43,6 +43,9 @@ from pathlib import Path
 from typing import Optional
 
 import yaml  # type: ignore
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _audit_schema import is_independently_created  # noqa: E402
 
 CONCURRENCY = int(os.environ.get("AUTONOMA_FIDELITY_CONCURRENCY", "6"))
 PER_MODEL_TIMEOUT = int(os.environ.get("AUTONOMA_FIDELITY_TIMEOUT", "180"))
@@ -366,7 +369,7 @@ def main() -> None:
         sys.exit(0)
     handler_src = handler_path.read_text()
 
-    models = [name for name, entry in snap.items() if entry.get("has_creation_code")]
+    models = [name for name, entry in snap.items() if is_independently_created(entry)]
     if not models:
         sys.exit(0)
     if len(models) > MAX_MODELS:

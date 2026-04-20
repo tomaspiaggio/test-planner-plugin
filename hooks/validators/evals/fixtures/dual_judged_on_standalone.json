@@ -1,0 +1,13 @@
+{
+  "note": "Dual model (independently_created:true AND in someone's created_by). Must be judged ONLY on its standalone factory; the via-owner relationship must not affect the verdict.",
+  "model": "Branch",
+  "expected_verdict": "pass",
+  "expected_fail_criteria": [],
+  "step2_audit_entry": "- name: Branch\n  independently_created: true\n  creation_file: src/branches/branch.service.ts\n  creation_function: BranchService.create\n  side_effects:\n    - Writes a default BranchSettings row\n  created_by:\n    - owner: Application\n      via: ApplicationsService.createApplication\n      why: \"Every new Application needs a default main branch, created inline in the same transaction.\"\n",
+  "current_audit_entry": "- name: Branch\n  independently_created: true\n  creation_file: src/branches/branch.service.ts\n  creation_function: BranchService.create\n  side_effects:\n    - Writes a default BranchSettings row\n  created_by:\n    - owner: Application\n      via: ApplicationsService.createApplication\n      why: \"Every new Application needs a default main branch, created inline in the same transaction.\"\n",
+  "handler_path": "src/routes/autonoma/autonoma.handler.ts",
+  "factory_block": "Branch: defineFactory({\n    async create(data, ctx) {\n        return BranchService.create(data, { executor: ctx.executor });\n    },\n}),",
+  "helper_section": "(The factory does not call an external helper.)",
+  "original_creation_file": "src/branches/branch.service.ts",
+  "original_creation_snippet": "export const BranchService = {\n    async create(input, deps) {\n        const branch = await deps.executor.branch.create({ data: input });\n        await deps.executor.branchSettings.create({ data: { branchId: branch.id, theme: 'default' } });\n        return branch;\n    },\n};"
+}
