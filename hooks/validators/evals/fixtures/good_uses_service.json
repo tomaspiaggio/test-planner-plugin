@@ -1,0 +1,12 @@
+{
+  "model": "User",
+  "expected_verdict": "pass",
+  "expected_fail_criteria": [],
+  "step2_audit_entry": "- name: User\n  has_creation_code: true\n  creation_file: src/users/user.service.ts\n  creation_function: UserService.create\n  side_effects:\n    - Hashes password via bcrypt\n    - Creates sibling Organization + Member rows\n    - Emits user_signed_up analytics event\n",
+  "current_audit_entry": "- name: User\n  has_creation_code: true\n  creation_file: src/users/user.service.ts\n  creation_function: UserService.create\n  side_effects:\n    - Hashes password via bcrypt\n    - Creates sibling Organization + Member rows\n    - Emits user_signed_up analytics event\n",
+  "handler_path": "src/routes/autonoma/autonoma.handler.ts",
+  "factory_block": "User: defineFactory({\n    async create(data, ctx) {\n        return UserService.create(data, { executor: ctx.executor });\n    },\n}),",
+  "helper_section": "(The factory does not call an external helper.)",
+  "original_creation_file": "src/users/user.service.ts",
+  "original_creation_snippet": "export const UserService = {\n    async create(input, deps) {\n        const hashed = await bcrypt.hash(input.password, 10);\n        const user = await deps.executor.user.create({ data: { ...input, password: hashed } });\n        await ensureOrgMembership(user, deps);\n        await analytics.capture('user_signed_up', { userId: user.id });\n        return user;\n    },\n};"
+}

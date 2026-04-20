@@ -1,0 +1,12 @@
+{
+  "model": "User",
+  "expected_verdict": "fail",
+  "expected_fail_criteria": [1, 2, 4],
+  "step2_audit_entry": "- name: User\n  has_creation_code: true\n  creation_file: src/auth/auth.ts\n  creation_function: buildAuth.databaseHooks.user.create\n  side_effects:\n    - Calls ensureOrgMembership (creates Organization + Member)\n    - Calls ensureBillingProvisioning (creates BillingCustomer)\n    - Emits user_signed_up analytics event\n    - Fires signup webhook\n",
+  "current_audit_entry": "- name: User\n  has_creation_code: true\n  creation_file: src/auth/auth.ts\n  creation_function: buildAuth.databaseHooks.user.create\n  side_effects:\n    - Calls ensureOrgMembership (creates Organization + Member)\n    - Calls ensureBillingProvisioning (creates BillingCustomer)\n    - Emits user_signed_up analytics event\n    - Fires signup webhook\n",
+  "handler_path": "src/routes/autonoma/autonoma.handler.ts",
+  "factory_block": "User: defineFactory({\n    async create(data, ctx) {\n        return createUser(ctx.executor, data);\n    },\n}),",
+  "helper_section": "File: src/routes/autonoma/autonoma-factories.ts\nFunction: createUser\n\n```\n// better-auth's internal adapter does the same thing — no business logic\n// beyond the raw insert.\nexport async function createUser(db, data) {\n    return db.user.create({ data, select: { id: true } });\n}\n```",
+  "original_creation_file": "src/auth/auth.ts",
+  "original_creation_snippet": "export const buildAuth = (db) => betterAuth({\n    database: prismaAdapter(db),\n    databaseHooks: {\n        user: {\n            create: async (user) => {\n                const created = await db.user.create({ data: user });\n                await ensureOrgMembership(created, { db });\n                await ensureBillingProvisioning(created, { db });\n                await analytics.capture('user_signed_up', { userId: created.id });\n                await fireSignupWebhook(created);\n                return created;\n            },\n        },\n    },\n});"
+}
