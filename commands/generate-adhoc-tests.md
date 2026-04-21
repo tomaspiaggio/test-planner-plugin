@@ -72,9 +72,11 @@ HTTP_STATUS=$(echo "$RESPONSE" | grep -o "HTTP_STATUS:[0-9]*" | cut -d: -f2)
 BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
 echo "Setup API response (HTTP $HTTP_STATUS): $BODY"
 GENERATION_ID=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo '')
+APPLICATION_ID=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('applicationId',''))" 2>/dev/null || echo "$AUTONOMA_PROJECT_ID")
 mkdir -p autonoma
 echo "$GENERATION_ID" > "autonoma/.generation-id-${FOCUS_SLUG}"
 echo "Generation ID: $GENERATION_ID"
+echo "Application ID: $APPLICATION_ID"
 ```
 
 If `GENERATION_ID` is empty, log the HTTP status and response body above for debugging, then continue anyway — reporting is best-effort and must never block test generation.
@@ -106,7 +108,7 @@ echo "Has active scenarios: $HAS_SCENARIOS"
 AUTONOMA_ROOT=$(cat /tmp/autonoma-project-root 2>/dev/null || echo '.')
 GENERATION_ID=$(cat "$AUTONOMA_ROOT/autonoma/.generation-id-${FOCUS_SLUG}" 2>/dev/null || echo '')
 
-EXISTING_CONTEXT=$(curl -s "${AUTONOMA_API_URL}/v1/setup/applications/${AUTONOMA_PROJECT_ID}/test-suite" \
+EXISTING_CONTEXT=$(curl -s "${AUTONOMA_API_URL}/v1/setup/applications/${APPLICATION_ID}/test-suite" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}")
 
 SCENARIOS_CONTEXT=$(echo "$SCENARIOS_RESPONSE" | python3 -c "
