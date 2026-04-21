@@ -4,8 +4,8 @@ This guide explains how to test changes from a branch without publishing to the 
 
 ## Prerequisites
 
-- [Claude Code](https://claude.ai/code) installed
-- Your branch pushed to GitHub
+- [Claude Code](https://claude.ai/code)
+- your branch pushed to GitHub
 
 ## Install from a branch
 
@@ -31,15 +31,22 @@ Push new commits to your branch, then reinstall:
 
 ## Environment variables
 
-The plugin requires three environment variables to be set in the project where you run it:
+The plugin itself requires these values in the target project session:
 
 | Variable | Description |
 | --- | --- |
-| `AUTONOMA_API_KEY` | Your Autonoma API key (get it from the dashboard under Settings > API Keys) |
-| `AUTONOMA_PROJECT_ID` | The application ID from the Autonoma dashboard |
-| `AUTONOMA_API_URL` | API base URL - use `http://localhost:4000` for local dev |
+| `AUTONOMA_API_KEY` | Autonoma API key |
+| `AUTONOMA_PROJECT_ID` | Application ID from the Autonoma dashboard |
+| `AUTONOMA_API_URL` | API base URL, for example `http://localhost:4000` in local dev |
 
-Add them to the `.env` file or export them in your shell before running Claude Code in the target project.
+You do **not** need to pre-set `AUTONOMA_SDK_ENDPOINT`, `AUTONOMA_SHARED_SECRET`, or `AUTONOMA_SIGNING_SECRET`.
+Step 1 creates or discovers those values in the target repo by editing `.env` and `.env.example`.
+
+Use `AUTONOMA_AUTO_ADVANCE=true` as the canonical launch mode while testing. If you are still using
+the older confirmation flag, `AUTONOMA_REQUIRE_CONFIRMATION=false` is treated as the same
+auto-advance behavior.
+
+After the generated PR is merged, the user still needs to deploy those env changes.
 
 ## References
 

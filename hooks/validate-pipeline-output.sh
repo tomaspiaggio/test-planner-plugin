@@ -34,6 +34,14 @@ case "$FILE_PATH" in
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_discover.py"
     VALIDATOR_NAME="validate-discover"
     ;;
+  */autonoma/.sdk-endpoint)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_sdk_endpoint.py"
+    VALIDATOR_NAME="validate-sdk-endpoint"
+    ;;
+  */autonoma/.sdk-integration.json)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_sdk_integration.py"
+    VALIDATOR_NAME="validate-sdk-integration"
+    ;;
   */autonoma/features.json)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_features.py"
     VALIDATOR_NAME="validate-features"
@@ -41,6 +49,10 @@ case "$FILE_PATH" in
   */autonoma/scenarios.md)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenarios.py"
     VALIDATOR_NAME="validate-scenarios"
+    ;;
+  */autonoma/.scenario-validation.json)
+    VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenario_validation.py"
+    VALIDATOR_NAME="validate-scenario-validation"
     ;;
   */autonoma/scenario-recipes.json)
     VALIDATOR_SCRIPT="$VALIDATORS_DIR/validate_scenario_recipes.py"
