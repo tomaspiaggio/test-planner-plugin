@@ -106,7 +106,7 @@ echo "Has active scenarios: $HAS_SCENARIOS"
 AUTONOMA_ROOT=$(cat /tmp/autonoma-project-root 2>/dev/null || echo '.')
 GENERATION_ID=$(cat "$AUTONOMA_ROOT/autonoma/.generation-id-${FOCUS_SLUG}" 2>/dev/null || echo '')
 
-EXISTING_CONTEXT=$(curl -s "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/existing-tests" \
+EXISTING_CONTEXT=$(curl -s "${AUTONOMA_API_URL}/v1/setup/setups/${GENERATION_ID}/test-suite" \
   -H "Authorization: Bearer ${AUTONOMA_API_KEY}")
 
 SCENARIOS_CONTEXT=$(echo "$SCENARIOS_RESPONSE" | python3 -c "
