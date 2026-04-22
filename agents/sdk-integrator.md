@@ -28,6 +28,9 @@ The SDK reference repo path is provided by the orchestrator in `/tmp/autonoma-sd
 ## Strict Rules
 
 - Install the SDK from package managers only. Never vendor, copy, or link SDK source into the user's app.
+- **Never create a standalone server or sidecar.** The endpoint lives as a new route inside the project's existing backend. Do NOT create a new `FastAPI()` / `express()` / `Flask(__name__)` / `Gin.Default()` instance, a new `main.py` / `server.py` / `start-*.py` / `main.go` launcher, or open a separate port. If the project already has a backend, integrate into it.
+- **SDK language must match backend language.** Detect the backend's language from its manifest file BEFORE picking an SDK. Do not install the Python SDK into a TypeScript/NestJS project (or vice versa). If no matching SDK exists for the backend language, stop per Step 3 — do NOT fall back to a sidecar in a different language.
+- **Never scaffold at repo root when a backend directory exists**, including non-standard names like `core-app-backend/`, `apps/api/`, `services/core/`. Locate the backend first (Step 1).
 - Do NOT modify the SDK reference repo.
 - Do NOT modify database schemas, migrations, or models.
 - Keep integration changes minimal and aligned with the project's existing conventions.
@@ -38,19 +41,45 @@ The SDK reference repo path is provided by the orchestrator in `/tmp/autonoma-sd
 
 ## Required Order
 
-### 1. Detect the stack
+### 1. Locate the backend directory and detect the stack
 
-Inspect the repo for:
-- `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`
-- `pyproject.toml`, `requirements.txt`, `Pipfile`
-- `mix.exs`
-- `composer.json`
-- `pom.xml`, `build.gradle`
-- `Gemfile`
-- `Cargo.toml`
-- `go.mod`
+**Do this BEFORE picking an SDK.** The SDK must match the backend's language, so the backend must be located first.
 
-Determine:
+#### 1a. Enumerate candidate backend directories
+
+Use Glob / `ls`. Do NOT hardcode the name `backend/`. Real projects use many conventions:
+
+- `backend/`, `server/`, `api/`, `service/`, `services/`
+- `*-backend/`, `*-api/`, `*-server/`, `core-*/`, `app-*/` (e.g. `core-app-backend/`)
+- Monorepo layouts: `apps/*`, `packages/*`, `services/*`
+- Single-repo backends at the workspace root
+
+#### 1b. Identify the backend by manifest file
+
+For each candidate, look for one of these manifest files — the file's language determines the SDK you install:
+
+- `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` → TypeScript/JavaScript
+- `pyproject.toml`, `requirements.txt`, `Pipfile` → Python
+- `mix.exs` → Elixir
+- `composer.json` → PHP
+- `pom.xml`, `build.gradle` → Java
+- `Gemfile`, `*.gemspec` → Ruby
+- `Cargo.toml` → Rust
+- `go.mod` → Go
+
+Pick exactly one backend. If multiple plausible candidates exist, STOP and ask the user which one — do not guess, do not implement in more than one.
+
+#### 1c. Confirm with the user before writing any code
+
+State your finding:
+
+> "I found the backend at `<path>` (language: `<lang>`, framework: `<framework>`, ORM: `<orm>`, package manager: `<pm>`). I'll integrate the SDK there. Is that the right location?"
+
+Wait for confirmation before installing packages or writing files.
+
+#### 1d. Determine the rest of the stack
+
+From the identified backend directory, determine:
 - language
 - server framework
 - ORM or DB adapter
